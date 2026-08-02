@@ -1,0 +1,58 @@
+# Local deployment of the Sentinel reporting server.
+#
+#   docker compose -f server/docker-compose.yml up --build
+#
+# Before exposing this to a network, set SENTINEL_SERVER_TOKENS. Without it
+# the write endpoints are unauthenticated and anyone can submit reports and
+# upload samples.
+#
+# Generate a token with:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: sentinel-server:latest
+    container_name: sentinel-server
+    restart: unless-stopped
+    ports:
+      # Bound to loopback by default. Change to "8000:8000" only once a
+      # token is configured and TLS is terminated in front of it.
+      - "127.0.0.1:8000:8000"
+    environment:
+      SENTINEL_SERVER_DB_URL: sqlite:////data/sentinel-server.db
+      SENTINEL_SERVER_SAMPLE_DIR: /data/samples
+      SENTINEL_SERVER_LOG_LEVEL: INFO
+      SENTINEL_SERVER_MAX_UPLOAD: "33554432"
+      SENTINEL_SERVER_RATE_LIMIT: "60"
+      # Comma-separated. Empty means no authentication — see the note above.
+      SENTINEL_SERVER_TOKENS: "${SENTINEL_SERVER_TOKENS:-}"
+      # Stable salt so rate-limit buckets survive a restart. Any random hex
+      # string; it never leaves the server.
+      SENTINEL_SERVER_IP_SALT: "${SENTINEL_SERVER_IP_SALT:-change-me}"
+    volumes:
+      - sentinel-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen(
+              "http://127.0.0.1:8000/health", timeout=4).status == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    # The container stores live malware. Keep its capabilities minimal.
+    cap_drop:
+      - ALL
+
+volumes:
+  sentinel-data:
+    driver: local

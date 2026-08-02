@@ -1,0 +1,114 @@
+name: Missed detection
+description: Sentinel did not flag a file you believe is malicious
+title: "[Missed detection] "
+labels: ["missed-detection", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time.
+
+        > **Do not attach the sample to this issue.** Uploading live malware
+        > to a public repository is dangerous for everyone who clones it, and
+        > against GitHub's terms. Give us the hash; a maintainer will arrange
+        > a private channel if the sample is needed.
+
+        If you have not already, check the file on a multi-engine service
+        first — if nothing else detects it either, say so, that is useful
+        information rather than a reason not to file.
+
+  - type: input
+    id: sha256
+    attributes:
+      label: SHA-256 of the file
+      placeholder: 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-malicious
+    attributes:
+      label: Why do you believe it is malicious?
+      description: >
+        Behaviour you observed, an analysis report, or what other tools call
+        it. "It was detected by X as Y" is perfectly good evidence.
+      placeholder: |
+        Arrived as an attachment claiming to be an invoice. On opening it
+        wrote a Run key and started beaconing to a host in the URL below.
+        Three engines on VirusTotal call it Agent Tesla.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: file-type
+    attributes:
+      label: File type
+      options:
+        - Windows executable (.exe/.dll)
+        - Script (PowerShell, JS, VBS, batch, shell)
+        - Office document or PDF
+        - Archive (zip, rar, 7z)
+        - Linux or macOS binary
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: delivery
+    attributes:
+      label: How did it arrive?
+      description: Helps us weight which detectors to improve.
+      options:
+        - Email attachment
+        - Download from a website
+        - USB or removable media
+        - Software bundle or installer
+        - Found during analysis, not in the wild
+        - Other or unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: scan-output
+    attributes:
+      label: What Sentinel said
+      description: "Output of `sentinel scan <file> --json`, redacting the path."
+      render: json
+
+  - type: textarea
+    id: indicators
+    attributes:
+      label: Indicators
+      description: >
+        Domains, IPs, registry keys, dropped file names — anything a
+        detection rule could key on. Defang URLs (hxxp://).
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Sentinel version
+      placeholder: "0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: signatures
+    attributes:
+      label: Signature version
+      description: >
+        From `sentinel status`. A miss on an old signature set is often
+        already fixed.
+      placeholder: "2026.08.01"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have NOT attached the malware sample to this issue
+          required: true
+        - label: I ran `sentinel update` and the file is still not detected
+          required: true

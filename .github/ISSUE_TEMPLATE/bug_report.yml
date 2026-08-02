@@ -1,0 +1,110 @@
+name: Bug report
+description: Something crashes, hangs, or behaves incorrectly
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For detection problems please use the **False positive** or
+        **Missed detection** templates instead — they ask for the right
+        information.
+
+        This template is for everything else: crashes, hangs, wrong counts,
+        broken output, quarantine or restore failures.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      placeholder: >
+        `sentinel scan` hangs at around 40,000 files and never finishes.
+        No CPU use after that point.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output and logs
+      description: >
+        Re-run with `--log-level DEBUG` and paste the output. The log file
+        is at `%LOCALAPPDATA%\sentinel-scan\logs\sentinel.log` on Windows,
+        `~/.local/share/sentinel-scan/logs/` on Linux, and
+        `~/Library/Application Support/sentinel-scan/logs/` on macOS.
+
+        Set `SENTINEL_REDACT_PATHS=1` to strip your home directory from the
+        output before pasting.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `sentinel status`
+      description: Gives us the versions, detector state and privacy settings.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Where did it happen?
+      options:
+        - Command line
+        - Desktop GUI
+        - Used as a Python library
+        - Reporting server
+    validations:
+      required: true
+
+  - type: input
+    id: install-method
+    attributes:
+      label: How did you install it?
+      placeholder: "pip install sentinel-scan / Windows installer / from source"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I am on the latest version, or have said which version I am on
+          required: true
+        - label: I have removed anything private from the logs I pasted
+          required: true

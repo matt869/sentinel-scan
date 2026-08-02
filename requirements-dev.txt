@@ -1,0 +1,22 @@
+# Development dependencies. Includes everything from requirements.txt.
+-r requirements.txt
+
+# --- test -------------------------------------------------------------
+pytest>=7.4
+pytest-cov>=4.1
+pytest-timeout>=2.2
+
+# --- lint / type ------------------------------------------------------
+ruff>=0.4
+mypy>=1.9
+
+# --- server (only needed if you run the reporting backend locally) ----
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+pydantic>=2.6
+python-multipart>=0.0.9
+
+# --- packaging --------------------------------------------------------
+pyinstaller>=6.5
+build>=1.2

@@ -1,0 +1,118 @@
+name: False positive
+description: Sentinel flagged a file you believe is safe
+title: "[False positive] "
+labels: ["false-positive", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. False positives are the highest-priority
+        class of bug in this project — a scanner that condemns people's own
+        software stops being trusted for anything.
+
+        **Please do not attach the file itself.** This is a public tracker.
+        The hash is enough to identify it; a maintainer will ask for a
+        private channel if a sample turns out to be necessary.
+
+        `sentinel report <file> --false-positive` fills most of this in
+        for you.
+
+  - type: input
+    id: threat-name
+    attributes:
+      label: Detection name
+      description: What Sentinel called it, e.g. `Heuristic.Packed.UPX`.
+      placeholder: Heuristic.Script.Dropper
+    validations:
+      required: true
+
+  - type: input
+    id: detector
+    attributes:
+      label: Which detector fired
+      description: Shown in brackets in the CLI output.
+      placeholder: script, yara, pe_heuristic, hash, archive…
+    validations:
+      required: true
+
+  - type: input
+    id: sha256
+    attributes:
+      label: SHA-256 of the file
+      description: "`sentinel scan <file> --json` prints it, as does `certutil -hashfile <file> SHA256`."
+      placeholder: 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-is-it
+    attributes:
+      label: What is this file?
+      description: >
+        The most useful thing you can tell us. Where it came from, what it
+        does, and why you are confident it is safe.
+      placeholder: |
+        It is the release binary from my own Rust project, built with
+        `cargo build --release`. Sentinel flags it as packed, but that is
+        just the normal LLVM output being dense.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: publisher
+    attributes:
+      label: Is this widely distributed software?
+      description: Affects how urgently we treat it.
+      options:
+        - "Yes — a popular application many people would have"
+        - "Yes — but niche or internal to my organisation"
+        - "No — something I built or wrote myself"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Scan output
+      description: >
+        Paste the output of `sentinel scan <file>`. Redact the path if it
+        contains anything sensitive — we do not need it.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Sentinel version
+      description: "`sentinel --version`"
+      placeholder: "0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: signatures
+    attributes:
+      label: Signature version
+      description: "The 'Signature version' line from `sentinel status`."
+      placeholder: "2026.08.01"
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have not attached the file itself
+          required: true
+        - label: I have checked this is not already reported
+          required: true

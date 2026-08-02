@@ -1,0 +1,25 @@
+# Runtime dependencies for Sentinel Scan.
+#
+# The core scanner only needs the first block. Everything below "optional
+# back-ends" unlocks an extra detector or subsystem; the app degrades
+# gracefully when any of them is absent (the detector reports itself as
+# unavailable and is skipped).
+#
+# Install everything:  pip install -r requirements.txt
+# Minimal install:     pip install typer rich platformdirs httpx
+
+# --- core -------------------------------------------------------------
+typer>=0.12
+rich>=13.7
+platformdirs>=4.2
+httpx>=0.27
+tomli>=2.0; python_version < "3.11"
+
+# --- optional back-ends -----------------------------------------------
+yara-python>=4.5      # YARA rule matching
+pefile>=2023.2.7      # PE/COFF header heuristics
+clamd>=1.0.2          # ClamAV daemon client
+psutil>=5.9           # process / drive enumeration
+
+# --- optional desktop UI ----------------------------------------------
+PySide6>=6.6

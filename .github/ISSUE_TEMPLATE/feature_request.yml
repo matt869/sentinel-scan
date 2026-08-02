@@ -1,0 +1,81 @@
+name: Feature request
+description: Suggest a capability or an improvement
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing this up, it is worth knowing what this project has
+        deliberately decided *not* to do:
+
+        - **Real-time on-access scanning.** That needs a kernel driver or a
+          filesystem filter. Getting it wrong bluescreens machines, and it
+          is not something a Python application should attempt.
+        - **Automatic removal or "cleaning" of infected files.** Sentinel
+          quarantines reversibly; it does not try to surgically repair a
+          binary.
+        - **Terminating or blocking processes automatically.** The system
+          tools are reported, and acting on them is left to the user.
+        - **Persistent installation identifiers.** Telemetry batches carry
+          no identifier, by design — see docs/privacy.md.
+
+        Proposals in those areas are still welcome as discussions, but they
+        will not be accepted as straightforward features.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: >
+        Describe the situation you are in, not the solution you have in
+        mind. This is the part that determines whether the feature gets
+        built.
+      placeholder: >
+        I run Sentinel from cron across a fleet and have no way to tell
+        whether a scan found anything without parsing the human-readable
+        output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Workarounds you are using now, and why they fall short.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the project?
+      multiple: true
+      options:
+        - Detection engine or a new detector
+        - Command line interface
+        - Desktop GUI
+        - Quarantine and whitelist
+        - Signatures and updates
+        - Reporting server
+        - Packaging and installation
+        - Documentation
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you be willing to work on this?
+      options:
+        - "Yes, I would like to implement it"
+        - "Yes, with some guidance"
+        - "I can help test it"
+        - "No, just suggesting"
+    validations:
+      required: true

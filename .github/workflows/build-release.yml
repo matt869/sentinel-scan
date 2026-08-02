@@ -1,0 +1,199 @@
+name: Build and release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without the leading v)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION"
+
+      - name: Check the tag matches the package version
+        shell: bash
+        run: |
+          DECLARED=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/sentinel/version.py)
+          RESOLVED="${{ steps.resolve.outputs.version }}"
+          if [ "$DECLARED" != "$RESOLVED" ]; then
+            echo "::error::version.py says $DECLARED but the tag says $RESOLVED"
+            exit 1
+          fi
+
+  pypi:
+    name: Build distributions
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+  windows:
+    name: Windows executable
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]"
+          pip install pyinstaller
+
+      - name: Fetch signatures
+        continue-on-error: true
+        run: |
+          python scripts/fetch_signatures.py --output ./mirror --only hashes
+          python scripts/build_hash_db.py --csv ./mirror/malwarebazaar.csv `
+            --source MalwareBazaar `
+            --output src/sentinel/signatures/local/hashes.db --replace
+
+      - name: Build with PyInstaller
+        run: pyinstaller packaging/windows/sentinel.spec --clean --noconfirm
+
+      - name: Verify the bundle runs
+        run: |
+          .\dist\sentinel\sentinel.exe --version
+          .\dist\sentinel\sentinel.exe detectors
+
+      - name: Sign
+        # Skipped on forks and PRs, where the secret is unavailable.
+        if: ${{ env.CERT_PFX != '' }}
+        env:
+          CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $bytes = [Convert]::FromBase64String($env:CERT_PFX)
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", $bytes)
+          $password = ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
+          .\packaging\windows\sign.ps1 -PfxPath "$env:RUNNER_TEMP\cert.pfx" `
+            -PfxPassword $password
+          Remove-Item "$env:RUNNER_TEMP\cert.pfx" -Force
+
+      - name: Build the installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=${{ needs.version.outputs.version }} `
+            packaging\windows\installer.iss
+
+      - name: Sign the installer
+        if: ${{ env.CERT_PFX != '' }}
+        env:
+          CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $bytes = [Convert]::FromBase64String($env:CERT_PFX)
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", $bytes)
+          $password = ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
+          .\packaging\windows\sign.ps1 -Path packaging\windows\Output `
+            -PfxPath "$env:RUNNER_TEMP\cert.pfx" -PfxPassword $password
+          Remove-Item "$env:RUNNER_TEMP\cert.pfx" -Force
+
+      - name: Compute checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem packaging\windows\Output\*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -Append -Encoding utf8 `
+              packaging\windows\Output\SHA256SUMS.txt
+          }
+          Get-Content packaging\windows\Output\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            packaging/windows/Output/*.exe
+            packaging/windows/Output/SHA256SUMS.txt
+
+  release:
+    name: Publish release
+    needs: [version, pypi, windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \
+            -o -name '*.exe' -o -name 'SHA256SUMS.txt' \) \
+            -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Extract the changelog section
+        id: changelog
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          # Pull the section for this version out of CHANGELOG.md.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry for $VERSION." > release-notes.md
+          fi
+          cat release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: release-notes.md
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

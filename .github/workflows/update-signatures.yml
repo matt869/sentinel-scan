@@ -1,0 +1,166 @@
+name: Update signatures
+
+on:
+  schedule:
+    # Twice daily. Signature feeds update continuously; this is a compromise
+    # between freshness and hammering the upstream mirrors.
+    - cron: "0 3,15 * * *"
+  workflow_dispatch:
+    inputs:
+      include_clamav:
+        description: "Also fetch the ClamAV databases (large, GPL-2.0)"
+        type: boolean
+        default: false
+      publish:
+        description: "Publish the result as a release asset"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Fetch and build the signature bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx
+
+      - name: Fetch upstream feeds
+        id: fetch
+        run: |
+          ARGS="--output ./mirror"
+          if [ "${{ inputs.include_clamav }}" = "true" ]; then
+            ARGS="$ARGS --include-optional"
+          fi
+          python scripts/fetch_signatures.py $ARGS
+
+      - name: Build the hash database
+        run: |
+          if [ -f ./mirror/malwarebazaar.csv ]; then
+            python scripts/build_hash_db.py \
+              --csv ./mirror/malwarebazaar.csv --source MalwareBazaar \
+              --output ./mirror/hashes.db --replace
+            python scripts/build_hash_db.py --output ./mirror/hashes.db --stats
+          else
+            echo "::warning::no hash feed was downloaded; skipping the database build"
+          fi
+
+      - name: Validate the bundle
+        # A signature set that breaks the scanner is worse than a stale one.
+        # Build it, load it, and scan something before publishing.
+        run: |
+          pip install -e ".[yara]"
+          python - <<'PY'
+          import pathlib, sys, tempfile, os
+          os.environ["SENTINEL_DATA_DIR"] = tempfile.mkdtemp()
+
+          from sentinel.core.config import load_config
+          from sentinel.signatures.loader import HashDatabase, SignatureStore
+
+          config = load_config()
+          config.paths.ensure()
+
+          source = pathlib.Path("./mirror/hashes.db")
+          if source.is_file():
+              target = pathlib.Path(config.paths.signatures_dir) / "hashes.db"
+              target.write_bytes(source.read_bytes())
+              database = HashDatabase(target)
+              count = len(database)
+              print(f"hash database loads: {count:,} signatures")
+              if count == 0:
+                  sys.exit("the hash database is empty")
+              database.close()
+
+          rules = SignatureStore(config).yara_rule_files()
+          print(f"{len(rules)} YARA rule file(s) resolved")
+
+          from sentinel.engine.scanner import Scanner
+          scanner = Scanner(config)
+          try:
+              probe = pathlib.Path(tempfile.mkdtemp()) / "probe.txt"
+              probe.write_text("harmless content")
+              verdict = scanner.scan_file(probe)
+              assert verdict.is_clean, "a plain text file was flagged"
+              print("scanner loads the bundle and reports clean on a clean file")
+          finally:
+              scanner.close()
+          PY
+
+      - name: Recompute the manifest checksums
+        run: |
+          python - <<'PY'
+          import hashlib, json, pathlib
+
+          root = pathlib.Path("./mirror")
+          manifest_path = root / "manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+
+          for bundle in manifest.get("bundles", []):
+              directory = bundle.get("directory", "")
+              path = root / directory / bundle["name"] if directory else root / bundle["name"]
+              if not path.is_file():
+                  continue
+              data = path.read_bytes()
+              bundle["sha256"] = hashlib.sha256(data).hexdigest()
+              bundle["size"] = len(data)
+              print(f"{bundle['name']}: {bundle['size']:,} bytes, "
+                    f"{bundle['sha256'][:16]}…")
+
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+          cat ./mirror/manifest.json
+
+      - name: Package
+        id: package
+        run: |
+          VERSION=$(date -u +%Y.%m.%d.%H%M)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          tar -czf "sentinel-signatures-${VERSION}.tar.gz" -C ./mirror .
+          sha256sum "sentinel-signatures-${VERSION}.tar.gz" | tee SHA256SUMS.txt
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signatures-${{ steps.package.outputs.version }}
+          path: |
+            sentinel-signatures-*.tar.gz
+            SHA256SUMS.txt
+            mirror/manifest.json
+          retention-days: 14
+
+      - name: Publish as a rolling release
+        if: ${{ inputs.publish != false && github.event_name != 'pull_request' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: signatures-latest
+          name: "Signature bundle ${{ steps.package.outputs.version }}"
+          body: |
+            Automatically built signature bundle.
+
+            Clients verify each file against the sha256 recorded in
+            `manifest.json`; a download whose hash does not match is
+            discarded and never installed.
+
+            Note that ClamAV databases, when included, are GPL-2.0 licensed
+            and distributed by Cisco Systems, Inc. They are not covered by
+            this project's MIT licence.
+          files: |
+            sentinel-signatures-*.tar.gz
+            SHA256SUMS.txt
+            mirror/manifest.json
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,83 @@
+# --- Python -----------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Virtual environments ---------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Test / coverage --------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Editors ----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Secrets / local config -------------------------------------------
+.env
+.env.local
+*.pem
+*.pfx
+*.p12
+config.local.toml
+
+# --- Signature data ---------------------------------------------------
+# Signature bundles are downloaded at runtime, never committed. The files
+# tracked under src/sentinel/signatures/local/ are placeholders that the
+# updater overwrites; ignore the real payloads.
+src/sentinel/signatures/local/*.cvd
+src/sentinel/signatures/local/*.cud
+src/sentinel/signatures/local/hashes.db
+src/sentinel/signatures/local/rules/*.yar
+!src/sentinel/signatures/local/rules/example.yar
+signatures-cache/
+
+# --- Runtime state ----------------------------------------------------
+# Quarantined files are encrypted, but never let them near a commit.
+quarantine/
+*.quarantine
+sentinel.db
+sentinel.db-wal
+sentinel.db-shm
+*.log
+logs/
+
+# --- Packaging --------------------------------------------------------
+packaging/windows/Output/
+packaging/windows/build/
+packaging/windows/dist/
+
+# --- Server -----------------------------------------------------------
+server/data/
+server/*.db

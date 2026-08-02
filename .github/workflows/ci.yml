@@ -1,0 +1,231 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  # Keep every test run away from the runner's real home directory.
+  SENTINEL_DATA_DIR: ${{ github.workspace }}/.sentinel-test-data
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff mypy
+
+      - name: Ruff
+        run: ruff check src server scripts tests
+
+      - name: Ruff format check
+        run: ruff format --check src server scripts tests
+        continue-on-error: true
+
+      - name: Mypy
+        run: mypy src server
+        continue-on-error: true
+
+  test:
+    name: Test ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12"]
+        exclude:
+          # Keep the matrix affordable: only the newest Python on the
+          # non-Linux runners, since platform-specific code is thin.
+          - os: macos-latest
+            python: "3.10"
+          - os: macos-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.10"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[yara,pe,system]"
+          pip install pytest pytest-cov pytest-timeout
+
+      - name: Exclude the test directory from Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # The suite writes the EICAR test string to a temp directory. Real-time
+        # protection deletes it mid-test, which produces a confusing failure.
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP" -ErrorAction Stop
+            Add-MpPreference -ExclusionPath "${{ github.workspace }}" -ErrorAction Stop
+          } catch {
+            Write-Host "Could not set a Defender exclusion; EICAR tests may skip."
+          }
+
+      - name: Run tests
+        run: pytest -v --timeout=300 --cov=sentinel --cov-report=xml --cov-report=term
+
+      - name: Smoke-test the CLI
+        shell: bash
+        run: |
+          python -m sentinel --version
+          python -m sentinel detectors
+          python -m sentinel status
+          # An empty directory must exit 0 (clean).
+          mkdir -p /tmp/sentinel-empty || mkdir -p "$RUNNER_TEMP/sentinel-empty"
+          python -m sentinel scan "${TMPDIR:-/tmp}/sentinel-empty" || test $? -eq 0
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  server:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install fastapi "uvicorn[standard]" sqlalchemy pydantic \
+                      python-multipart httpx pytest
+
+      - name: Import check
+        run: python -c "from server.main import app; print(len(app.routes), 'routes')"
+
+      - name: Smoke-test the API
+        env:
+          SENTINEL_SERVER_DB_URL: sqlite:///./ci.db
+          SENTINEL_SERVER_SAMPLE_DIR: ./ci-samples
+          SENTINEL_SERVER_TOKENS: ci-token
+        run: |
+          python - <<'PY'
+          from fastapi.testclient import TestClient
+          from server.main import app
+
+          with TestClient(app) as client:
+              assert client.get("/health").status_code == 200
+              # Write endpoints must reject an unauthenticated caller.
+              assert client.post("/v1/reports", json={}).status_code == 401
+              assert client.get("/v1/stats").status_code == 200
+          print("server smoke test passed")
+          PY
+
+  gui:
+    name: GUI import check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 \
+            libdbus-1-3 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-shape0 libxcb-xinerama0
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[gui]"
+
+      - name: Build every view offscreen
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          import os, sys, tempfile
+          os.environ["SENTINEL_DATA_DIR"] = tempfile.mkdtemp()
+
+          from PySide6.QtWidgets import QApplication
+          from sentinel.core.config import load_config
+          from sentinel.ui.windows.main_window import MainWindow
+
+          config = load_config()
+          config.paths.ensure()
+          app = QApplication(sys.argv)
+          window = MainWindow(config)
+          window.show()
+          assert window.pages.count() == 4
+          for index in range(window.sidebar.count()):
+              window.sidebar.setCurrentRow(index)
+              app.processEvents()
+          window.close()
+          print("GUI built successfully")
+          PY
+
+  build:
+    name: Package check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Check metadata
+        run: twine check dist/*
+
+      - name: Install the wheel in a clean environment
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install dist/*.whl
+          /tmp/fresh/bin/sentinel --version
+          /tmp/fresh/bin/sentinel detectors
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          retention-days: 7

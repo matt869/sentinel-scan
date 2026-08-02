@@ -1,0 +1,133 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentinel-scan"
+description = "A cross-platform, open-source malware scanner with a pluggable detection engine."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dynamic = ["version"]
+authors = [{ name = "The Sentinel Scan contributors" }]
+keywords = ["antivirus", "malware", "scanner", "yara", "clamav", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Monitoring",
+]
+
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "platformdirs>=4.2",
+    "httpx>=0.27",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# Detection back-ends. Every one of these is optional: a detector whose
+# dependency is missing reports itself as unavailable instead of failing.
+yara = ["yara-python>=4.5"]
+pe = ["pefile>=2023.2.7"]
+clamav = ["clamd>=1.0.2"]
+system = ["psutil>=5.9"]
+gui = ["PySide6>=6.6"]
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.6",
+    "python-multipart>=0.0.9",
+]
+all = ["sentinel-scan[yara,pe,clamav,system,gui]"]
+
+[project.urls]
+Homepage = "https://github.com/sentinel-scan/sentinel-scan"
+Documentation = "https://github.com/sentinel-scan/sentinel-scan/tree/main/docs"
+Source = "https://github.com/sentinel-scan/sentinel-scan"
+Issues = "https://github.com/sentinel-scan/sentinel-scan/issues"
+Changelog = "https://github.com/sentinel-scan/sentinel-scan/blob/main/CHANGELOG.md"
+
+[project.scripts]
+sentinel = "sentinel.__main__:main"
+sentinel-scan = "sentinel.__main__:main"
+
+[project.gui-scripts]
+sentinel-gui = "sentinel.ui.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.dynamic]
+version = { attr = "sentinel.version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["sentinel*"]
+
+[tool.setuptools.package-data]
+sentinel = [
+    "signatures/manifest.json",
+    "signatures/local/*.cvd",
+    "signatures/local/*.db",
+    "signatures/local/rules/*.yar",
+    "ui/styles/*.qss",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests that take more than a second",
+    "requires_yara: needs yara-python installed",
+    "requires_clamav: needs a reachable clamd daemon",
+    "network: performs real network I/O",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests", "server", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "B008",   # typer uses function calls in argument defaults by design
+    "SIM108", # ternaries are not always more readable
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "server"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[tool.coverage.run]
+source = ["src/sentinel"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

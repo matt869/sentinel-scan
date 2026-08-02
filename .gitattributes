@@ -1,0 +1,28 @@
+# Normalise line endings. This project is developed on Windows, Linux and
+# macOS; without this the whole tree shows as modified when a contributor
+# switches platform.
+
+* text=auto eol=lf
+
+# Windows-only tooling that must keep CRLF to run correctly.
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.iss   text eol=crlf
+
+# Binary, never touch.
+*.png   binary
+*.ico   binary
+*.jpg   binary
+*.gif   binary
+*.db    binary
+*.cvd   binary
+*.cud   binary
+*.quar  binary
+*.pfx   binary
+*.p12   binary
+
+# Keep diffs readable for generated or data files.
+*.json  text eol=lf
+*.yar   text eol=lf
+*.qss   text eol=lf

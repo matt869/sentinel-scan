@@ -30,6 +30,7 @@ from sentinel.core.config import Config
 from sentinel.core.db import Database
 from sentinel.core.logger import get_logger
 from sentinel.engine.verdict import ScanResult
+from sentinel.system.hardware import stored_summary, tune_once
 from sentinel.ui.app import ScanController
 from sentinel.ui.tray import SentinelTray, status_from_world
 from sentinel.ui.windows.quarantine_view import QuarantineView
@@ -71,6 +72,10 @@ class MainWindow(QMainWindow):
         self.resize(1100, 720)
         self.setMinimumSize(860, 560)
 
+        # Measure the machine before anything is painted, so the settings
+        # page shows what was chosen rather than the defaults it replaced.
+        self._tuning = tune_once(config, self.db)
+
         self._build_ui()
         self._build_menu()
         self._connect()
@@ -106,7 +111,7 @@ class MainWindow(QMainWindow):
         self.scan_view = ScanView(self.config)
         self.results_view = ResultsView(self.config, self.db)
         self.quarantine_view = QuarantineView(self.config, self.db)
-        self.settings_view = SettingsView(self.config)
+        self.settings_view = SettingsView(self.config, stored_summary(self.db))
 
         for view in (
             self.scan_view, self.results_view,

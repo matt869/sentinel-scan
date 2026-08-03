@@ -10,6 +10,42 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Added — auto-configuration
+
+- **Sentinel measures the machine at first launch and picks its own
+  settings.** Users cannot answer "what performance mode would you like?" —
+  they do not know what a worker thread is, and asking makes them responsible
+  for a decision they will get wrong and then blame the software for.
+- **But it says what it chose**, in words that can be checked against what
+  somebody knows about their own computer:
+
+      Your drive is a hard disk, so Sentinel checks one file at a time.
+      That is faster on drives like yours — reading several at once makes
+      the drive jump back and forth.
+
+  Shown once at the end of the first scan, in `sentinel status`, and at the
+  top of the GUI settings page.
+- **Rotational storage detection**, which is the measurement that matters
+  most and the least obvious. `IOCTL_STORAGE_QUERY_PROPERTY` on Windows —
+  opened with no access rights, so no administrator prompt —
+  `/sys/block/…/queue/rotational` on Linux, `diskutil` on macOS. If none of
+  those answer, a seek-timing probe: twelve random reads, median latency, and
+  a rotating platter cannot hide a seek. Still unresolved is treated as
+  rotating, because being conservative on an SSD costs some speed while being
+  wrong the other way makes a hard disk thrash.
+- On a hard disk, or an undetermined one, exactly **one worker** regardless of
+  core count. On a 4 GB machine, a **400-file rule budget** and a smaller
+  buffer cap (`detectors.yara_file_budget`).
+- Measured once and persisted, not re-derived per launch: the probe is not
+  free on the machines it matters for, and a value that can change between
+  starts means a user who read "checks one file at a time" can later catch the
+  software contradicting itself.
+
+### Fixed
+
+- `--config` loaded from the file it was given but saved to the platform
+  default, so a setting written on one run was invisible on the next.
+
 ### Added — the tray and the flyout
 
 - **The tray icon**, with additive state. A scan running, two files in the

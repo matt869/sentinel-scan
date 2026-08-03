@@ -33,9 +33,10 @@ log = get_logger(__name__)
 class SettingsView(QWidget):
     """Edits the configuration and writes it back to disk."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, tuning_summary: str = "") -> None:
         super().__init__()
         self.config = config
+        self._tuning_summary = tuning_summary
         self._build()
         self.refresh()
 
@@ -56,6 +57,8 @@ class SettingsView(QWidget):
         layout = QVBoxLayout(container)
         layout.setSpacing(16)
 
+        if self._tuning_summary:
+            layout.addWidget(self._build_hardware_box())
         layout.addWidget(self._build_privacy_box())
         layout.addWidget(self._build_scan_box())
         layout.addWidget(self._build_detector_box())
@@ -77,6 +80,31 @@ class SettingsView(QWidget):
         outer.addLayout(buttons)
 
     # -- sections ------------------------------------------------------
+
+    def _build_hardware_box(self) -> QGroupBox:
+        """What Sentinel measured, and what it chose because of it.
+
+        Shown first, and worded so somebody who knows nothing about scanners
+        can still check it against what they know about their own computer.
+        Nobody is asked to pick a performance mode — but they are told, which
+        is what turns an automatic decision into evidence the software looked
+        at their machine rather than guessing.
+        """
+        box = QGroupBox("Set up for your computer")
+        layout = QVBoxLayout(box)
+
+        summary = QLabel(self._tuning_summary)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        note = QLabel(
+            "Sentinel chose these when it first ran. You can change anything "
+            "below if you would rather."
+        )
+        note.setObjectName("dim")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        return box
 
     def _build_privacy_box(self) -> QGroupBox:
         box = QGroupBox("Privacy")

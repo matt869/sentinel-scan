@@ -71,6 +71,33 @@ cli / ui     user-facing front ends
                                   SQLite history
 ```
 
+### Measuring the machine
+
+`system/hardware.py`, run once on first launch. Nobody is asked to choose a
+performance mode — they cannot answer, and asking transfers the blame for a
+decision they had no way to make. So Sentinel measures and decides.
+
+The measurement that matters most is also the least obvious: **is the disk
+spinning?** Parallel reads on a rotating platter make the head seek between
+them and roughly halve throughput, so the right worker count on a hard disk
+is one and the core count is irrelevant. Getting it backwards is a
+forty-minute scan against a ninety-minute one.
+
+Detection asks the OS first — `IOCTL_STORAGE_QUERY_PROPERTY` on Windows
+(opened with no access rights, so it works unelevated),
+`/sys/block/…/queue/rotational` on Linux, `diskutil` on macOS — and falls
+back to timing twelve random reads, taking the median so one page-cache hit
+and one unlucky outlier both fail to move the answer. Anything still unknown
+is treated as rotating: conservative on an SSD costs some speed, wrong the
+other way makes a hard disk thrash, and only one of those is recoverable by
+waiting.
+
+The result is applied *and written to the configuration file*. In-memory only
+would mean the setting lasts exactly one run — the next start reloads
+`threads = 0`, "decide automatically", which on a hard disk means many
+workers on a drive already established to want one. Persisting also makes the
+choice visible and editable, which is the point of telling the user at all.
+
 ### Two phases, and the time estimate
 
 `engine/progress.py`. A scan on a spinning disk runs for tens of minutes, and

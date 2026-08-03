@@ -84,6 +84,17 @@ class YaraDetector(Detector):
         detectors_cfg = getattr(self.config, "detectors", None)
         if detectors_cfg is not None:
             self._timeout = getattr(detectors_cfg, "yara_timeout", 20)
+            budget = int(getattr(detectors_cfg, "yara_file_budget", 0) or 0)
+            if budget and len(sources) > budget:
+                # Compiling twenty thousand rules costs real memory on a
+                # machine that has none to spare. Files are kept in the
+                # order the store returns them, which puts the bundled
+                # high-value set before anything downloaded in bulk.
+                self.log.info(
+                    "compiling %d of %d rule files to fit this machine",
+                    budget, len(sources),
+                )
+                sources = sources[:budget]
 
         # Namespace each file by its stem so rule name collisions between
         # third-party rule sets do not abort the whole compile.

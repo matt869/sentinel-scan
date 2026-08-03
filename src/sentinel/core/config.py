@@ -169,6 +169,11 @@ class DetectorSettings:
     #: Extra rules loaded on top of the bundled set.
     yara_rules_dir: str | None = None
     yara_timeout: int = 20
+    #: Cap on how many YARA rule files to compile. 0 means all of them.
+    #: Set automatically on a machine with little memory: a few hundred
+    #: high-value rules cost a little detection and buy back a lot of the
+    #: user's afternoon.
+    yara_file_budget: int = 0
 
     #: Suppress purely heuristic findings on binaries signed by the operating
     #: system vendor. Those components legitimately do the unusual things the
@@ -334,6 +339,13 @@ def load_config(
     config = Config(paths=Paths.default(data_dir))
 
     path = Path(config_file) if config_file else config.paths.config_file
+    if config_file:
+        # Point the config directory at the file we were actually told to
+        # use, so anything that saves later writes back to the same place it
+        # read from. Without this, --config loads from one file and saves to
+        # another, and a setting the user can see never comes back.
+        config.paths.config_dir = path.expanduser().resolve().parent
+
     if path.is_file():
         try:
             with open(path, "rb") as fh:

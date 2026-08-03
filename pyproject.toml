@@ -116,6 +116,7 @@ ignore = [
 # to check line by line against Microsoft's documentation, which is the only
 # way anyone verifies a binding like this is correct.
 "src/sentinel/system/authenticode.py" = ["N801", "N806"]
+"src/sentinel/system/hardware.py" = ["N801", "N806"]
 
 [tool.mypy]
 python_version = "3.10"

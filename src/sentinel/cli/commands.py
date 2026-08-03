@@ -210,6 +210,25 @@ def scan(
         [d.strip() for d in detectors.split(",") if d.strip()] if detectors else None
     )
 
+    # Measure the machine and pick settings for it, once ever. Before the
+    # Scanner is built, so the thread count it chooses is the one used.
+    from sentinel.system.hardware import tune_once
+
+    tuning_db = Database(config.paths.db_file)
+    try:
+        tuning = tune_once(config, tuning_db)
+    finally:
+        tuning_db.close()
+
+    if tuning is not None and not as_json:
+        console.print(
+            Panel(
+                escape(tuning.explain()),
+                title="Set up for your computer",
+                border_style="cyan",
+            )
+        )
+
     bus = EventBus()
     scanner = Scanner(config, bus=bus, detectors=detector_names)
 
@@ -547,6 +566,17 @@ def status(config_file: Path | None = typer.Option(None, "--config")) -> None:
         else "[yellow]not honoured[/yellow]",
     )
     table.add_row("", "")
+    table.add_row(
+        "Files at once",
+        str(config.scan.threads) if config.scan.threads else "chosen automatically",
+    )
+    table.add_row(
+        "Threat rules",
+        str(config.detectors.yara_file_budget)
+        if config.detectors.yara_file_budget
+        else "all of them",
+    )
+    table.add_row("", "")
     table.add_row("Scans recorded", f"{counts['scans']:,}")
     table.add_row("Findings recorded", f"{counts['findings']:,}")
     table.add_row("Quarantined files", f"{counts['quarantine']:,}")
@@ -559,6 +589,18 @@ def status(config_file: Path | None = typer.Option(None, "--config")) -> None:
     table.add_row("Sample upload", describe_gate(config).split(": ", 1)[1])
 
     console.print(Panel(table, title="Sentinel Scan status", border_style="cyan"))
+
+    from sentinel.system.hardware import stored_summary
+
+    db = Database(config.paths.db_file)
+    try:
+        summary = stored_summary(db)
+    finally:
+        db.close()
+    if summary:
+        console.print(
+            Panel(escape(summary), title="Set up for your computer", border_style="cyan")
+        )
 
     if not privileges.elevated:
         console.print(f"\n[dim]{privileges.note}[/dim]")

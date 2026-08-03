@@ -141,8 +141,11 @@ class ScanView(QWidget):
         layout = QVBoxLayout(box)
 
         self.progress = QProgressBar()
-        # Indeterminate: the file count is not known until traversal ends,
-        # and counting first would double the work.
+        # Starts indeterminate. The scan counts the tree before reading any
+        # of it, and until that finishes a percentage would be a guess that
+        # jumps backwards the moment a large directory turns up. The bar
+        # switches to a real range in _switch_to_measured once the total is
+        # known.
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
@@ -226,16 +229,53 @@ class ScanView(QWidget):
             self._threat_count = 0
             self.activity.clear()
             self.stats_label.setText("Starting…")
+            # Back to indeterminate for the counting phase of the next scan.
+            self.progress.setRange(0, 0)
 
     # -- slots ---------------------------------------------------------
 
-    @Slot(int, int, str)
-    def on_progress(self, files: int, total_bytes: int, current: str) -> None:
+    @Slot(dict)
+    def on_enumerating(self, payload: dict[str, Any]) -> None:
+        """Phase one: counting the tree. No percentage is possible yet.
+
+        The running count and the scrolling path are what tell a worried
+        user the app has not frozen — which is the whole job of this phase.
+        """
+        found = int(payload.get("files_total") or 0)
+        self.stats_label.setText(f"Looking through your files — {found:,} so far")
+        self.current_label.setText(shorten_path(str(payload.get("current", "")), 90))
+
+    @Slot(dict)
+    def on_progress(self, payload: dict[str, Any]) -> None:
+        """Phase two: real totals, so a real bar and a real estimate."""
+        from sentinel.engine.progress import format_eta
+
+        self.current_label.setText(shorten_path(str(payload.get("current", "")), 90))
+        done = int(payload.get("files_scanned") or 0)
+        fraction = payload.get("fraction")
+
+        if fraction is None:
+            # Enumeration was skipped or cancelled. An indeterminate bar is
+            # the honest answer; a made-up percentage is not.
+            self.progress.setRange(0, 0)
+            self.stats_label.setText(
+                f"{done:,} files · {human_bytes(int(payload.get('bytes_scanned') or 0))}"
+                f" · {self._threat_count} threat(s)"
+            )
+            return
+
+        # A permille range rather than 0-100: on a scan of a million files a
+        # percentage bar visibly stalls for tens of seconds per step.
+        if self.progress.maximum() != 1000:
+            self.progress.setRange(0, 1000)
+        self.progress.setValue(int(float(fraction) * 1000))
+
+        total = int(payload.get("files_total") or 0)
         self.stats_label.setText(
-            f"{files:,} files · {human_bytes(total_bytes)} · "
+            f"{done:,} of {total:,} files · "
+            f"{format_eta(payload.get('eta_seconds'))} left · "
             f"{self._threat_count} threat(s)"
         )
-        self.current_label.setText(shorten_path(current, 90))
 
     @Slot(dict)
     def on_threat(self, payload: dict[str, Any]) -> None:

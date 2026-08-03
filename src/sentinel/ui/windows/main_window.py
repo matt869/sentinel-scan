@@ -171,6 +171,7 @@ class MainWindow(QMainWindow):
         self.scan_view.set_running(True)
 
         worker = self.controller.start(self.config, roots, quarantine)
+        worker.enumerating.connect(self.scan_view.on_enumerating)
         worker.progress.connect(self.scan_view.on_progress)
         worker.threat_found.connect(self._on_threat)
         worker.suspicious_found.connect(self.results_view.add_finding)

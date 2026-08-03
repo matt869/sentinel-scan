@@ -10,7 +10,61 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Rule revocation — the kill switch.** `revoked_rules.json` is fetched from
+  the mirror on every update run and disables named rules locally. Detections
+  matching a revoked rule are dropped before scoring, so a rule that turns out
+  to quarantine people's files stops firing within hours instead of waiting
+  for the next signature release. Revocations can only ever *remove* a
+  detection, never add one, and a missing, unreachable or malformed list
+  leaves every rule active — a kill switch that fails closed would be worse
+  than the bug it exists to switch off. Entries may be scoped to one detector
+  and may carry an expiry date; wildcards are refused and a list over 10,000
+  entries is rejected outright.
+- `updates.honor_revocations` and `updates.revocation_url` settings, and a
+  "Revoked rules" row in `sentinel status`.
+- The revocation list is refreshed in the background when a scan starts, rate
+  limited by `updates.check_interval_hours`. Only the list, never the
+  signature bundles: a few kilobytes is worth fetching unasked, hundreds of
+  megabytes on a metered connection is not.
+- **A time estimate that does not lie.** Scans now run in two phases. The
+  first counts the tree and reports a running total, because a percentage
+  before that is a guess that jumps backwards the moment a large directory
+  turns up. The second shows a real bar and a time remaining. The estimate
+  measures *bytes*, not files — a directory of 2 KB configs and one holding a
+  4 GB disk image are the same "one file" to a counter — says nothing for the
+  first few seconds while the rate is still meaningless, and rises only
+  slowly, so hitting a slow patch stretches the estimate instead of making it
+  leap from five minutes to three hours. Wording is deliberately vague:
+  "about 12 minutes" is a promise that can be kept.
+- `sentinel scan --no-estimate` skips the counting pass for anyone who would
+  rather start reading files immediately. `--json` skips it automatically.
+- `SCAN_ENUMERATING` event, and `SCAN_PROGRESS` payloads gained `phase`,
+  `files_total`, `bytes_total`, `fraction` and `eta_seconds`. The existing
+  `files_scanned`, `bytes_scanned` and `current` keys are unchanged.
+
+### Changed
+
+- `ScanWorker.progress` (GUI) now carries the whole progress payload as a
+  dict instead of `(files, bytes, current)`, and is joined by
+  `ScanWorker.enumerating`.
+
+### Fixed
+
+- **A file that could not be read was reported clean, and cached as clean.**
+  The read-error check ran before the file had been opened, so it never saw
+  anything; the failure actually surfaced one line later, when the digest was
+  computed, and nothing rechecked it. Files that were locked, permission-denied
+  or removed mid-scan therefore reached every content detector with no
+  contents to inspect and came out the far end looking fine. They are now
+  reported as errors, excluded from the result cache, and called out in the
+  scan summary rather than sitting in a count.
+- **The quarantine vault key was written corrupt on roughly one Windows
+  install in eight.** `os.open` defaults to text mode on Windows, so every
+  `0x0A` byte in the 32-byte random key was written as `0x0D 0x0A`. The
+  oversized key then failed its length check on every subsequent run,
+  permanently, and nothing already in the vault could be restored.
 
 ## [0.4.0] — 2026-08-02
 

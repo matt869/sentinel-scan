@@ -175,6 +175,13 @@ class SignatureStore:
         """Newest available hash database, user copy winning over bundled."""
         return self._first_existing("hashes.db")
 
+    @property
+    def revocations_path(self) -> Path | None:
+        """The installed rule revocation list, if one has been fetched."""
+        from sentinel.signatures.revocations import REVOCATION_FILENAME
+
+        return self._first_existing(REVOCATION_FILENAME)
+
     def yara_rule_files(self) -> list[Path]:
         """Every ``.yar``/``.yara`` file to compile, deduplicated by name.
 
@@ -266,6 +273,8 @@ class SignatureStore:
             except Exception as exc:
                 log.debug("cannot count hash signatures: %s", exc)
 
+        from sentinel.signatures.revocations import RevocationList
+
         manifest = self.manifest()
         return {
             "version": manifest.get("version", "0"),
@@ -274,6 +283,7 @@ class SignatureStore:
             "hash_count": hash_count,
             "yara_files": len(self.yara_rule_files()),
             "clamav_bundles": len(self.clamav_db_paths()),
+            "revoked_rules": len(RevocationList.load(self.config)),
             "user_dir": str(self.user_dir) if self.user_dir else None,
         }
 

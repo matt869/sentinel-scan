@@ -164,6 +164,10 @@ def scan(
     show_all: bool = typer.Option(
         False, "--all", help="List clean files too, not just findings."
     ),
+    no_estimate: bool = typer.Option(
+        False, "--no-estimate",
+        help="Start scanning immediately, with no percentage or time remaining.",
+    ),
     log_level: str = typer.Option("", "--log-level", help="DEBUG|INFO|WARNING|ERROR."),
     config_file: Path | None = typer.Option(None, "--config", help="Config file."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmations."),
@@ -209,14 +213,26 @@ def scan(
     bus = EventBus()
     scanner = Scanner(config, bus=bus, detectors=detector_names)
 
+    # Check for newly revoked rules on the way past. Backgrounded and rate
+    # limited, so it costs the scan nothing and a dead mirror delays nothing.
+    from sentinel.signatures.updater import refresh_revocations_in_background
+
+    refresh_revocations_in_background(config, scanner.db)
+
     if not as_json:
         _print_scan_header(roots, scanner)
 
+    # Counting the tree buys a percentage and a time remaining. With --json
+    # nobody is watching a bar, so it buys nothing and only costs a traversal.
+    estimate = not no_estimate and not as_json
+
     try:
         if as_json:
-            result = scanner.scan_paths(roots, quarantine, level)
+            result = scanner.scan_paths(roots, quarantine, level, estimate=False)
         else:
-            result = _scan_with_progress(scanner, bus, roots, quarantine, level)
+            result = _scan_with_progress(
+                scanner, bus, roots, quarantine, level, estimate=estimate
+            )
     except KeyboardInterrupt:
         scanner.cancel()
         err_console.print("\n[yellow]Cancelled.[/yellow]")
@@ -292,24 +308,64 @@ def _scan_with_progress(
     roots: list[str],
     quarantine: bool,
     level: Severity,
+    estimate: bool = True,
 ) -> ScanResult:
-    """Run a scan behind a live progress bar."""
+    """Run a scan behind a live progress bar.
+
+    Two phases, because a percentage is a lie until the tree has been
+    counted. Phase one shows a spinner and a running total; phase two
+    switches the same task to a real bar with a time remaining. The current
+    path stays on screen throughout — a scrolling path is the strongest
+    signal to a worried user that nothing has frozen.
+    """
+    from sentinel.engine.progress import format_eta
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(bar_width=None),
-        TextColumn("{task.completed:,} files"),
+        TextColumn("{task.fields[detail]}"),
         TimeElapsedColumn(),
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Scanning…", total=None)
+        task = progress.add_task(
+            "Looking through your files…", total=None, detail=""
+        )
 
-        def on_progress(event: Event) -> None:
+        def on_enumerating(event: Event) -> None:
+            found = event.get("files_total", 0)
             progress.update(
                 task,
-                completed=event.get("files_scanned", 0),
-                description=f"Scanning {shorten_path(event.get('current', ''), 44)}",
+                description=(
+                    f"Looking through your files "
+                    f"[dim]{escape(shorten_path(event.get('current', ''), 34))}[/dim]"
+                ),
+                detail=f"{found:,} found",
+            )
+
+        def on_progress(event: Event) -> None:
+            fraction = event.get("fraction")
+            done = event.get("files_scanned", 0)
+            total = event.get("files_total", 0)
+
+            if fraction is None:
+                # Enumeration was skipped or cancelled: no honest bar is
+                # available, so keep counting rather than invent one.
+                detail = f"{done:,} files"
+                progress.update(task, total=None, completed=done, detail=detail)
+            else:
+                detail = f"{done:,}/{total:,} · {format_eta(event.get('eta_seconds'))}"
+                progress.update(
+                    task, total=1000.0, completed=fraction * 1000.0, detail=detail
+                )
+
+            progress.update(
+                task,
+                description=(
+                    f"Checking "
+                    f"[dim]{escape(shorten_path(event.get('current', ''), 34))}[/dim]"
+                ),
             )
 
         def on_threat(event: Event) -> None:
@@ -322,10 +378,11 @@ def _scan_with_progress(
                 f"{escape(shorten_path(event.get('path', ''), 60))}"
             )
 
+        bus.subscribe(EventType.SCAN_ENUMERATING, on_enumerating)
         bus.subscribe(EventType.SCAN_PROGRESS, on_progress)
         bus.subscribe(EventType.THREAT_FOUND, on_threat)
 
-        return scanner.scan_paths(roots, quarantine, level)
+        return scanner.scan_paths(roots, quarantine, level, estimate=estimate)
 
 
 def _print_results(result: ScanResult, show_all: bool) -> None:
@@ -365,6 +422,14 @@ def _print_results(result: ScanResult, show_all: bool) -> None:
         f"{result.suspicious_count} suspicious, "
         f"{result.files_skipped} skipped, {result.errors} error(s)"
     )
+    if result.errors:
+        # An unreadable file is not a clean file. Say so plainly rather than
+        # letting the count sit in the line above looking like a statistic.
+        summary += (
+            f"\n[yellow]{human_count(result.errors, 'file')} could not be read "
+            f"and {'was' if result.errors == 1 else 'were'} not checked.[/yellow]"
+            f"\n[dim]Run again with --log-level DEBUG to list them.[/dim]"
+        )
     if result.cancelled:
         summary += "\n[yellow]Scan was cancelled — results are incomplete.[/yellow]"
 
@@ -475,6 +540,12 @@ def status(config_file: Path | None = typer.Option(None, "--config")) -> None:
     table.add_row("Hash signatures", f"{signatures['hash_count']:,}")
     table.add_row("YARA rule files", str(signatures["yara_files"]))
     table.add_row("ClamAV bundles", str(signatures["clamav_bundles"]))
+    table.add_row(
+        "Revoked rules",
+        str(signatures["revoked_rules"])
+        if config.updates.honor_revocations
+        else "[yellow]not honoured[/yellow]",
+    )
     table.add_row("", "")
     table.add_row("Scans recorded", f"{counts['scans']:,}")
     table.add_row("Findings recorded", f"{counts['findings']:,}")

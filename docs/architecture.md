@@ -71,6 +71,39 @@ cli / ui     user-facing front ends
                                   SQLite history
 ```
 
+### Two phases, and the time estimate
+
+`engine/progress.py`. A scan on a spinning disk runs for tens of minutes, and
+forty minutes with no idea how long is left reads as *frozen* — people kill
+it. The estimate is not decoration; it is what makes a slow scan survivable.
+
+The pipeline above runs twice. The first pass is `Scanner._enumerate`: the
+same `FileWalker`, counting files and bytes and discarding the entries. Only
+then does the real pass start, with totals in hand. Two traversals rather
+than one because the alternatives are both worse — buffering a few million
+`FileEntry` objects to save a `scandir` pass would cost more memory than the
+entire scan is allowed, and showing a percentage derived from a total we do
+not have means a bar that jumps backwards. The second walk mostly re-reads
+directory metadata the OS has just cached, and costs nothing next to the file
+reads that follow. `--no-estimate` skips it.
+
+The estimate itself has three deliberate properties, all of them about being
+believed rather than being precise:
+
+- **It measures bytes, not files.** A directory of 2 KB configs and one
+  holding a 4 GB disk image are the same "one file" to a counter, and an ETA
+  built on file counts lurches every time the mix changes.
+- **It rises slowly.** Falling is free; climbing is rationed to
+  `MAX_ETA_GROWTH` seconds per second of wall clock. An estimate that jumps
+  from five minutes to three hours because the scan hit a slow patch destroys
+  confidence in every number the app shows. Below 1.0 the number still counts
+  down while it stretches, and it can still recover — an estimate pinned at
+  "almost done" forever is its own lie.
+- **It says nothing until it knows something.** The opening seconds are
+  thread ramp-up and cache warming, so any rate computed from them is wrong.
+  Until there is enough evidence `eta_seconds` is `None` and the front ends
+  say "estimating".
+
 ### Why a custom worker pool
 
 `ThreadPoolExecutor.map` drains its input eagerly. Pointed at a full-disk
@@ -147,6 +180,41 @@ is missing reports itself unavailable and is skipped — a normal state, not
 an error.
 
 See `docs/writing-detectors.md`.
+
+## Rule revocation (the kill switch)
+
+`signatures/revocations.py`. A bad rule is worse than a missing one: it
+quarantines something the user needs, on a machine we cannot reach, and the
+fix would normally have to wait for the next signature version to be built,
+published and pulled — which users who never update never get at all.
+
+`revoked_rules.json` is fetched independently of the signature manifest, on
+every update run rather than every version bump, and lists rules that must
+not fire. The scanner drops matching detections in `_run_detectors`, before
+aggregation — early enough that a revoked detection contributes nothing to
+the score and a revoked *conclusive* one does not short-circuit the detectors
+queued behind it.
+
+A detection is matched on its name and on any `rule`, `signature`,
+`heuristic` or `id` in its metadata, so a YARA rule can be revoked by rule
+name even though the detection reports a threat name. Entries may be scoped
+to one detector and may carry an ISO-8601 `expires` date.
+
+Three properties are load-bearing:
+
+1. **Revocations only ever remove detections.** The worst a hostile or
+   corrupt list can do is make the scanner miss things; it can never cause a
+   file to be quarantined. That is why the file needs no manifest checksum —
+   anyone able to serve a malicious revocation list can already serve empty
+   signature bundles.
+2. **It fails open.** Missing, unreachable, oversized or malformed lists
+   leave every rule active. A kill switch that disables the scanner when it
+   breaks is a worse bug than the one it exists to fix. A download that will
+   not parse is discarded rather than installed, so a corrupt fetch cannot
+   silently un-revoke what the last good copy had disabled.
+3. **No wildcards, and a hard cap on breadth.** "Disable everything matching
+   `Trojan.*`" is not a switch anyone should be able to flip remotely, and a
+   list arriving with more than 10,000 entries is rejected whole.
 
 ## Quarantine
 

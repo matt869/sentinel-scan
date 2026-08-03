@@ -32,6 +32,7 @@ from sentinel.core.logger import get_logger
 from sentinel.engine.detectors import registry
 from sentinel.engine.detectors.archive_detector import ArchiveDetector
 from sentinel.engine.detectors.base import Detector, ScanTarget
+from sentinel.engine.progress import ProgressTracker
 from sentinel.engine.quarantine import Quarantine
 from sentinel.engine.queue import WorkerPool
 from sentinel.engine.verdict import (
@@ -44,6 +45,7 @@ from sentinel.engine.verdict import (
 from sentinel.engine.walker import FileEntry, FileWalker
 from sentinel.engine.whitelist import Whitelist
 from sentinel.signatures.loader import SignatureStore
+from sentinel.signatures.revocations import RevocationList
 from sentinel.utils.hashing import HashError, quick_fingerprint
 from sentinel.version import __version__
 
@@ -88,6 +90,10 @@ class Scanner:
         self.whitelist = Whitelist(self.db)
         self.quarantine = Quarantine(self.config, self.db, self.bus)
         self.signatures = SignatureStore(self.config)
+        #: Rules the kill switch has disabled. Reloaded at the start of every
+        #: scan so a long-running daemon picks up a revocation without a
+        #: restart.
+        self.revocations = RevocationList.empty()
 
         self.cancel_event = threading.Event()
         self._counter_lock = threading.Lock()
@@ -96,6 +102,8 @@ class Scanner:
         self._errors = 0
         self._last_progress = 0.0
         self._active = False
+        #: Progress and the time estimate. Replaced at the start of each scan.
+        self.progress = ProgressTracker()
 
     # -- lifecycle -----------------------------------------------------
 
@@ -139,6 +147,7 @@ class Scanner:
         quarantine_threats: bool = False,
         quarantine_threshold: Severity = Severity.HIGH,
         record_history: bool = True,
+        estimate: bool = True,
     ) -> ScanResult:
         """Scan every file under *paths* and return the result.
 
@@ -150,6 +159,10 @@ class Scanner:
                 Defaults to HIGH — acting automatically on heuristic MEDIUM
                 findings would move users' legitimate files.
             record_history: Write the scan and its findings to the database.
+            estimate: Walk the tree once first to count what is there, so the
+                scan can report a real percentage and time remaining. Costs a
+                metadata-only traversal; set False to start scanning
+                immediately with no bar.
         """
         if self._active:
             raise RuntimeError("this Scanner is already running a scan")
@@ -166,6 +179,7 @@ class Scanner:
 
         self.detectors = self._build_detectors()
         self.whitelist.reload()
+        self.revocations = RevocationList.load(self.config)
 
         self.bus.emit(
             EventType.SCAN_STARTED,
@@ -173,6 +187,12 @@ class Scanner:
             roots=roots,
             detectors=[d.name for d in self.detectors],
         )
+
+        if estimate and not self.cancel_event.is_set():
+            files_total, bytes_total = self._enumerate(roots)
+        else:
+            files_total, bytes_total = 0, 0
+        self.progress.begin_scanning(files_total, bytes_total)
 
         walker = FileWalker(self.config.scan, self.cancel_event)
         pool: WorkerPool[FileEntry, Verdict] = WorkerPool(
@@ -191,6 +211,7 @@ class Scanner:
                     self._emit_finding(verdict)
         finally:
             self._teardown_detectors()
+            self.progress.finish()
             self._active = False
 
         result = ScanResult(
@@ -236,6 +257,7 @@ class Scanner:
         """
         self.detectors = self._build_detectors()
         self.whitelist.reload()
+        self.revocations = RevocationList.load(self.config)
         try:
             return self._scan_target(ScanTarget(path=Path(path)))
         finally:
@@ -256,6 +278,48 @@ class Scanner:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+    # -- enumeration ---------------------------------------------------
+
+    def _enumerate(self, roots: Sequence[str]) -> tuple[int, int]:
+        """Count the files and bytes under *roots*. Returns ``(files, bytes)``.
+
+        A separate metadata-only traversal, run before the scan proper, so
+        the scan can report a real percentage and time remaining instead of
+        a spinner and a shrug. Entries are counted and discarded rather than
+        collected: buffering a few million :class:`FileEntry` objects to save
+        one ``scandir`` pass would cost more memory than the whole scan is
+        allowed.
+
+        The second traversal is cheaper than it looks — it re-reads directory
+        metadata the OS has just cached — and it costs nothing next to the
+        file reads that follow. Returns zeros if cancelled, which the tracker
+        reads as "no estimate".
+        """
+        counter = FileWalker(self.config.scan, self.cancel_event)
+        files = 0
+        total_bytes = 0
+        last_emit = 0.0
+
+        for entry in counter.walk(roots):
+            files += 1
+            total_bytes += entry.size
+
+            now = time.monotonic()
+            if now - last_emit >= PROGRESS_INTERVAL:
+                last_emit = now
+                self.progress.record_enumerated(files, total_bytes, str(entry.path))
+                self.bus.emit(
+                    EventType.SCAN_ENUMERATING,
+                    **self.progress.snapshot().as_payload(),
+                )
+
+        if self.cancel_event.is_set():
+            return 0, 0
+
+        self.progress.record_enumerated(files, total_bytes)
+        log.debug("enumerated %d files (%d bytes) before scanning", files, total_bytes)
+        return files, total_bytes
 
     # -- per-file work -------------------------------------------------
 
@@ -285,15 +349,23 @@ class Scanner:
         if cached is not None:
             return cached
 
-        if target.read_error:
-            return build_verdict(
-                str(target.path), (), size=target.size,
-                error=target.read_error, duration=time.monotonic() - started,
-            )
-
         # Hash-based whitelist needs the digest, which the hash detector will
         # want anyway — computing it here means one pass, not two.
         digest = target.sha256
+
+        # Hashing is the first thing that actually opens the file, so this is
+        # where a locked, vanished or permission-denied file surfaces —
+        # checking before this point only ever sees read_error unset. Without
+        # the digest the hash detector has nothing to look up and the content
+        # detectors have nothing to read, so the file would sail through as
+        # clean and be cached that way: a silent miss dressed up as a pass.
+        if target.read_error or not digest:
+            return build_verdict(
+                str(target.path), (), size=target.size,
+                error=target.read_error or "file could not be read",
+                duration=time.monotonic() - started,
+            )
+
         hit = self.whitelist.check(target.path, digest)
         if hit is not None:
             return build_verdict(
@@ -341,6 +413,12 @@ class Scanner:
                 log.debug("detector traceback", exc_info=True)
                 continue
 
+            # Drop revoked rules here rather than after aggregation: a
+            # revoked detection must not contribute to the score, and a
+            # revoked *conclusive* one must not short-circuit the detectors
+            # that would have run after it.
+            found = self.revocations.filter(found)
+
             if not found:
                 continue
 
@@ -377,6 +455,7 @@ class Scanner:
                 log.debug("detector %s failed on member %s: %s",
                           detector.name, target.member_name, exc)
                 continue
+            found = self.revocations.filter(found)
             detections.extend(found)
             if any(d.conclusive for d in found):
                 break
@@ -435,6 +514,7 @@ class Scanner:
         self._bytes_scanned = 0
         self._errors = 0
         self._last_progress = 0.0
+        self.progress = ProgressTracker()
 
     def _record(self, verdict: Verdict) -> None:
         """Update counters and emit throttled progress."""
@@ -443,20 +523,26 @@ class Scanner:
             self._bytes_scanned += verdict.size
             if verdict.error:
                 self._errors += 1
-            files = self._files_scanned
-            total_bytes = self._bytes_scanned
+
+        self.progress.record_scanned(verdict.size, verdict.path)
 
         now = time.monotonic()
         if now - self._last_progress >= PROGRESS_INTERVAL:
             self._last_progress = now
+            # The payload carries the totals, fraction and estimate; the
+            # older files_scanned/bytes_scanned/current keys are still in it
+            # under the same names, so existing subscribers keep working.
             self.bus.emit(
                 EventType.SCAN_PROGRESS,
-                files_scanned=files,
-                bytes_scanned=total_bytes,
-                current=verdict.path,
+                **self.progress.snapshot().as_payload(),
             )
 
         if verdict.error:
+            # DEBUG, not WARNING: a full Windows scan meets thousands of
+            # files held open by other processes, and burying the real
+            # findings under that noise is how people stop reading output.
+            # The count is surfaced in the summary either way.
+            log.debug("could not read %s: %s", verdict.path, verdict.error)
             self.bus.emit(EventType.FILE_ERROR, path=verdict.path, error=verdict.error)
         else:
             self.bus.emit(EventType.FILE_SCANNED, path=verdict.path,

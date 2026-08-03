@@ -52,7 +52,10 @@ class ScanWorker(QObject):
     machinery, so slots may touch widgets freely.
     """
 
-    progress = Signal(int, int, str)      # files_scanned, bytes_scanned, current
+    #: Full progress payload: counts, totals, fraction and time remaining.
+    progress = Signal(dict)
+    #: Counting the tree, before any of it is read.
+    enumerating = Signal(dict)
     threat_found = Signal(dict)           # verdict payload
     suspicious_found = Signal(dict)
     file_error = Signal(str, str)         # path, error
@@ -80,7 +83,9 @@ class ScanWorker(QObject):
         """Entry point connected to ``QThread.started``."""
         from sentinel.engine.scanner import Scanner
         from sentinel.engine.verdict import Severity
+        from sentinel.signatures.updater import refresh_revocations_in_background
 
+        self.bus.subscribe(EventType.SCAN_ENUMERATING, self._on_enumerating)
         self.bus.subscribe(EventType.SCAN_PROGRESS, self._on_progress)
         self.bus.subscribe(EventType.THREAT_FOUND, self._on_threat)
         self.bus.subscribe(EventType.SUSPICIOUS_FOUND, self._on_suspicious)
@@ -88,6 +93,9 @@ class ScanWorker(QObject):
 
         try:
             self._scanner = Scanner(self.config, bus=self.bus, detectors=self.detectors)
+            # Pick up newly revoked rules on the way past. Backgrounded and
+            # rate limited; a dead mirror delays the scan by nothing.
+            refresh_revocations_in_background(self.config, self._scanner.db)
             self.started.emit(self.roots)
             result = self._scanner.scan_paths(
                 self.roots, self.quarantine, Severity.HIGH
@@ -113,11 +121,10 @@ class ScanWorker(QObject):
     # -- event bridge --------------------------------------------------
 
     def _on_progress(self, event: Event) -> None:
-        self.progress.emit(
-            event.get("files_scanned", 0),
-            event.get("bytes_scanned", 0),
-            event.get("current", ""),
-        )
+        self.progress.emit(dict(event.payload))
+
+    def _on_enumerating(self, event: Event) -> None:
+        self.enumerating.emit(dict(event.payload))
 
     def _on_threat(self, event: Event) -> None:
         self.threat_found.emit(dict(event.payload))

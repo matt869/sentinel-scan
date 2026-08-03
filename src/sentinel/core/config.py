@@ -211,6 +211,13 @@ class UpdateSettings:
     #: Refuse to install a bundle whose sha256 is not in the manifest.
     verify_checksums: bool = True
     mirror_url: str = "https://updates.sentinel-scan.example/v1"
+    #: Honour the remote rule revocation list — the kill switch that stops a
+    #: rule known to misfire. Turning this off means a rule we have already
+    #: established is wrong keeps quarantining people's files; it exists for
+    #: offline installs pinned to an audited signature set.
+    honor_revocations: bool = True
+    #: Where to fetch the revocation list. Empty derives it from mirror_url.
+    revocation_url: str = ""
 
 
 @dataclass(slots=True)

@@ -33,6 +33,9 @@ class EventType(str, Enum):
     """Every event the engine can publish."""
 
     SCAN_STARTED = "scan.started"
+    #: Counting the tree before scanning it. No percentage is possible yet;
+    #: the payload carries a running count instead.
+    SCAN_ENUMERATING = "scan.enumerating"
     SCAN_PROGRESS = "scan.progress"
     SCAN_FINISHED = "scan.finished"
     SCAN_CANCELLED = "scan.cancelled"

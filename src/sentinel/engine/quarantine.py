@@ -131,7 +131,17 @@ class Quarantine:
         key = secrets.token_bytes(KEY_SIZE)
         # Create with restrictive permissions from the outset rather than
         # chmod-ing afterwards, which leaves a window where it is readable.
-        fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        #
+        # O_BINARY is not optional on Windows: os.open defaults to text mode
+        # there, so every 0x0A byte in the key is written as 0x0D 0x0A. Around
+        # one key in eight contains a newline byte, and the resulting 33-byte
+        # file fails the length check above forever — taking every already
+        # quarantined file with it, since nothing can be decrypted without the
+        # key. On POSIX the flag does not exist and is a no-op.
+        binary = getattr(os, "O_BINARY", 0)
+        fd = os.open(
+            self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | binary, 0o600
+        )
         try:
             os.write(fd, key)
         finally:

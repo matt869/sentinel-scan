@@ -76,6 +76,24 @@ class TestQuarantine:
         vault._key = None
         assert vault.key == first
 
+    def test_key_survives_newline_bytes(
+        self, vault: Quarantine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # os.open defaults to text mode on Windows, which rewrites every 0x0A
+        # in the key as 0x0D 0x0A. Roughly one random key in eight contains a
+        # newline byte, and the corrupt file then fails the length check for
+        # good — locking every already quarantined file away permanently.
+        # This key is all newlines so the bug is certain, not one-in-eight.
+        monkeypatch.setattr(
+            "sentinel.engine.quarantine.secrets.token_bytes", lambda n: b"\n" * n
+        )
+        created = vault.key
+        assert created == b"\n" * 32
+        assert vault.key_path.stat().st_size == 32
+
+        vault._key = None
+        assert vault.key == created
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions only")
     def test_key_is_owner_readable_only(self, vault: Quarantine) -> None:
         _ = vault.key

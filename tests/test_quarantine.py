@@ -233,8 +233,12 @@ class TestQuarantine:
         target.write_bytes(b"not really a database")
         verdict = build_verdict(str(target), [Detection("t", "X", 90)])
 
-        with pytest.raises(QuarantineError, match="own file"):
+        # Now enforced by the guard list, which raises the more specific
+        # QuarantineRefused — still a QuarantineError, so this stays the
+        # honest assertion: the vault would not touch it.
+        with pytest.raises(QuarantineError, match="own working files"):
             vault.quarantine(verdict)
+        assert target.read_bytes() == b"not really a database"
 
     def test_copy_mode_leaves_the_original(self, vault: Quarantine, flagged_file) -> None:
         path, verdict = flagged_file

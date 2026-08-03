@@ -33,7 +33,7 @@ from sentinel.engine.detectors import registry
 from sentinel.engine.detectors.archive_detector import ArchiveDetector
 from sentinel.engine.detectors.base import Detector, ScanTarget
 from sentinel.engine.progress import ProgressTracker
-from sentinel.engine.quarantine import Quarantine
+from sentinel.engine.quarantine import Quarantine, QuarantineRefused
 from sentinel.engine.queue import WorkerPool
 from sentinel.engine.verdict import (
     Detection,
@@ -375,6 +375,12 @@ class Scanner:
 
         detections = self._run_detectors(target)
 
+        if detections and self._vendor_signature_clears(target, detections):
+            return build_verdict(
+                str(target.path), (), sha256=digest, size=target.size,
+                whitelisted=True, duration=time.monotonic() - started,
+            )
+
         verdict = build_verdict(
             str(target.path),
             detections,
@@ -384,6 +390,58 @@ class Scanner:
         )
         self._cache_store(target, verdict)
         return verdict
+
+    def _vendor_signature_clears(
+        self, target: ScanTarget, detections: Sequence[Detection]
+    ) -> bool:
+        """Whether an OS-vendor signature should suppress these findings.
+
+        Structural heuristics are guesses about what code *looks* like, and
+        they are close to worthless when applied to the operating system's
+        own components — which legitimately inject into processes, hide
+        threads and ship compressed sections, because that is their job.
+        Windows' App-V subsystem imports the complete process-injection API
+        set, and it is a Microsoft binary doing exactly what it exists to do.
+
+        Conclusive detections are never suppressed. An exact digest match on
+        a signed file is still an exact match, and signing certificates do
+        get stolen — what does not happen is an attacker signing malware as
+        the operating system vendor.
+
+        The check costs a couple of milliseconds, so it is reached only when
+        something was already going to be reported: never on a clean file,
+        which is almost all of them.
+        """
+        if any(d.conclusive for d in detections):
+            return False
+
+        settings = getattr(self.config, "detectors", None)
+        if settings is not None and not getattr(
+            settings, "trust_os_vendor_signatures", True
+        ):
+            return False
+
+        # Archive members live in a temp directory and are not the signed
+        # artefact even when their container is.
+        if target.depth > 0:
+            return False
+
+        try:
+            from sentinel.system.authenticode import os_vendor_signer
+
+            signer = os_vendor_signer(target.path)
+        except Exception as exc:
+            log.debug("signature check unavailable for %s: %s", target.path, exc)
+            return False
+
+        if not signer:
+            return False
+
+        log.info(
+            "not reporting %d heuristic finding(s) on %s: signed by %s",
+            len(detections), target.display_path, signer,
+        )
+        return True
 
     def _run_detectors(self, target: ScanTarget) -> list[Detection]:
         """Run each interested detector, stopping on a conclusive hit."""
@@ -569,13 +627,40 @@ class Scanner:
         self.bus.emit(EventType.FILE_ERROR, path=str(entry.path), error=str(exc))
 
     def _quarantine_all(self, result: ScanResult, threshold: Severity) -> None:
-        """Move qualifying findings into the vault, updating their verdicts."""
+        """Move qualifying findings into the vault, updating their verdicts.
+
+        Two gates, and severity is only the second one.
+
+        Automatic action requires a *conclusive* detection — an exact digest
+        match against a known sample. Heuristics do not get to move people's
+        files on their own, however many of them fire and however high the
+        aggregate climbs. Six independent script heuristics combine to 93,
+        which is CRITICAL and would clear any severity threshold, and every
+        one of them is a guess about what code looks like rather than
+        knowledge of what it is. Those findings are still reported in full;
+        the user decides.
+        """
         for verdict in result.threats:
             if verdict.severity < threshold:
                 continue
+
+            if not any(d.conclusive for d in verdict.detections):
+                log.info(
+                    "not auto-quarantining %s: %s is heuristic, not an exact "
+                    "match on a known sample",
+                    verdict.path, verdict.name or "the finding",
+                )
+                verdict.action = "reported"
+                continue
+
             try:
                 self.quarantine.quarantine(verdict)
                 verdict.action = "quarantined"
+            except QuarantineRefused as exc:
+                # The guard list said no. Not a failure — a protection doing
+                # its job, and the user needs the distinction.
+                log.warning("not quarantining %s: %s", verdict.path, exc)
+                verdict.action = "protected"
             except Exception as exc:
                 log.error("could not quarantine %s: %s", verdict.path, exc)
                 verdict.action = "quarantine-failed"

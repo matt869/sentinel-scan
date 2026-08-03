@@ -10,6 +10,63 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Security
+
+Three of the four defenses the project requires before it has users were
+missing or broken. This completes them.
+
+- **The guard list.** Nothing previously stopped quarantine moving
+  `C:\Windows\System32\kernel32.dll` — only Sentinel's own data directory was
+  protected, and not even its install directory. `engine/guard.py` now refuses
+  to touch operating-system directories, Sentinel's own files, filesystem
+  roots, anything that is not an ordinary file, and binaries signed by the OS
+  vendor. It is checked inside `Quarantine.quarantine()`, so every path
+  through the vault is covered, and there is deliberately no setting to switch
+  it off. Verified against real system files: zero leaks, zero over-blocks.
+  Application directories such as `Program Files` are deliberately *not*
+  protected — malware installs there routinely.
+- **Confidence tiers.** Heuristic findings could auto-quarantine. Six
+  independent `script` heuristics, not one of them conclusive, aggregate to
+  93.6 — CRITICAL, clearing any severity threshold. Automatic action now
+  additionally requires a *conclusive* detection, meaning an exact digest
+  match against a known sample. Heuristic findings are reported in full and
+  marked `reported`; the user decides. Findings blocked by the guard are
+  marked `protected` rather than `quarantine-failed`, because a refusal that
+  protected the user is not an error they need to chase.
+- **The benign corpus, and a CI gate.** `tests/test_benign_corpus.py` scans
+  ordinary files of the shapes that trip naive heuristics, plus real binaries
+  sampled from the host operating system. Nothing is committed — the corpus is
+  generated at runtime and sampled from what the OS already installed. A pull
+  request that makes any detector flag one fails the build.
+
+### Fixed
+
+- **False positives on Windows system binaries: 252 per 1,000 → 0.** The
+  benign corpus found the PE heuristics flagging one in four `System32` DLLs,
+  two of them at HIGH severity. Four causes, all now fixed:
+  - `Heuristic.AntiDebug` counted `IsDebuggerPresent`,
+    `QueryPerformanceCounter`, `GetTickCount` and `OutputDebugStringA` — APIs
+    the MSVC runtime and any code that measures time or logs will import. It
+    fired on 19% of `System32`. The import set is now restricted to APIs with
+    no comfortable innocent explanation. (`getickcount` was also a typo for
+    `gettickcount` and had never matched anything.)
+  - `Heuristic.NoImportTable` fired on resource-only DLLs and .NET assemblies,
+    both of which import nothing for entirely ordinary reasons. It now
+    requires the binary to actually contain code.
+  - `Heuristic.EntryPointOutsideSections` read an `AddressOfEntryPoint` of
+    zero as an address pointing somewhere strange. Zero is the documented way
+    of saying there is no entry point, which is standard for resource-only
+    DLLs.
+  - `Heuristic.HighEntropySection` measured `.rsrc`, where compressed icons
+    and manifests live by design.
+- Purely heuristic findings on OS-vendor-signed binaries are now suppressed.
+  Windows' App-V subsystem imports the complete process-injection API set
+  because that is its job. Conclusive detections are never suppressed —
+  signing certificates get stolen, but not the OS vendor's. The check costs
+  ~2ms and is only reached when something was going to be reported anyway, so
+  a clean file never pays for it. Configurable via
+  `detectors.trust_os_vendor_signatures`.
+
 ### Added
 
 - **Rule revocation — the kill switch.** `revoked_rules.json` is fetched from

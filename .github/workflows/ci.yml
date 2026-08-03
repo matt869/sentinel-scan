@@ -95,6 +95,14 @@ jobs:
       - name: Run tests
         run: pytest -v --timeout=300 --cov=sentinel --cov-report=xml --cov-report=term
 
+      # Run again on its own so a false positive is unmistakable in the log
+      # rather than one red line among hundreds. This gate is the reason the
+      # detectors are allowed to get more aggressive: a rule that flags an
+      # ordinary file, or one of the operating system's own binaries, does
+      # not merge. It costs seconds and it is the highest-value check here.
+      - name: Benign corpus — no false positives
+        run: pytest tests/test_benign_corpus.py -v --timeout=300
+
       - name: Smoke-test the CLI
         shell: bash
         run: |

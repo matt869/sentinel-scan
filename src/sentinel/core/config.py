@@ -170,6 +170,12 @@ class DetectorSettings:
     yara_rules_dir: str | None = None
     yara_timeout: int = 20
 
+    #: Suppress purely heuristic findings on binaries signed by the operating
+    #: system vendor. Those components legitimately do the unusual things the
+    #: structural heuristics look for. Exact hash matches are never
+    #: suppressed. Turn off to audit the OS itself.
+    trust_os_vendor_signatures: bool = True
+
     def enabled_names(self) -> list[str]:
         return [
             name

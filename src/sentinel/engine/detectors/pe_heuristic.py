@@ -66,21 +66,77 @@ INJECTION_IMPORTS = frozenset(
 )
 
 #: Imports associated with anti-analysis behaviour.
+#:
+#: Deliberately narrow. The obvious-looking candidates — ``IsDebuggerPresent``,
+#: ``QueryPerformanceCounter``, ``GetTickCount``, ``OutputDebugStringA`` — are
+#: in a large fraction of everything built with MSVC, because the C runtime
+#: and ordinary timing and logging code call them. Including them flagged
+#: nearly a fifth of ``System32`` as anti-debug, which is not a signal, it is
+#: noise wearing a signal's clothes.
+#:
+#: What is left are APIs with no comfortable innocent explanation: asking
+#: whether a debugger is attached to another process, detaching one, or
+#: locking the user out of their own input devices.
+#:
+#: ``NtSetInformationThread`` and ``NtQueryObject`` were here too and had to
+#: go. Both have a well-known anti-debug use — ``ThreadHideFromDebugger``,
+#: querying for a DebugObject — but both are general-purpose NT calls used
+#: for thread naming and handle enumeration, and the pair fired on
+#: ``advapi32.dll``. A rule that flags a core Windows DLL is not a rule.
 ANTI_ANALYSIS_IMPORTS = frozenset(
     {
-        "isdebuggerpresent",
         "checkremotedebuggerpresent",
-        "ntqueryinformationprocess",
-        "outputdebugstringa",
-        "getickcount",
-        "queryperformancecounter",
+        "debugactiveprocessstop",
+        "ntyieldexecution",
+        "blockinput",
     }
 )
+
+#: Sections whose contents are compressed or encoded by design. Icons, PNGs
+#: and manifests all sit at high entropy in a perfectly ordinary binary, so
+#: measuring them tells you about the resource compiler, not the author.
+_ENTROPY_EXEMPT_SECTIONS = frozenset({".rsrc", ".reloc", ".debug", ".pdata", ".didat"})
+
+#: Section characteristic bits.
+_SCN_CNT_CODE = 0x00000020
+_SCN_MEM_EXECUTE = 0x20000000
+_SCN_MEM_WRITE = 0x80000000
+
+#: Index of the CLR header in the PE data directory. Present means .NET, and
+#: .NET assemblies legitimately import almost nothing.
+_DIRECTORY_COM_DESCRIPTOR = 14
 
 #: Imports used to build code at runtime — the classic packer/dropper stub.
 DYNAMIC_CODE_IMPORTS = frozenset(
     {"virtualalloc", "virtualprotect", "loadlibrarya", "loadlibraryw", "getprocaddress"}
 )
+
+
+def _carries_code(pe: Any) -> bool:
+    """Whether this binary has an executable section with anything in it.
+
+    A resource-only DLL does not, and most of the "packed binary" signals
+    mean nothing without code for them to be about.
+    """
+    try:
+        return any(
+            s.SizeOfRawData > 0
+            and bool(s.Characteristics & (_SCN_CNT_CODE | _SCN_MEM_EXECUTE))
+            for s in pe.sections
+        )
+    except Exception:  # pragma: no cover - defensive
+        return True
+
+
+def _is_dotnet(pe: Any) -> bool:
+    """Whether the binary carries a CLR header, i.e. is a .NET assembly."""
+    try:
+        directory = pe.OPTIONAL_HEADER.DATA_DIRECTORY
+        if len(directory) <= _DIRECTORY_COM_DESCRIPTOR:
+            return False
+        return bool(directory[_DIRECTORY_COM_DESCRIPTOR].VirtualAddress)
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 @registry.register
@@ -153,8 +209,10 @@ class PEHeuristicDetector(Detector):
                 if lowered.startswith(marker):
                     packer_names.add(packer)
 
-            # Section entropy: only meaningful for sections with real data.
-            if section.SizeOfRawData >= 4096:
+            # Section entropy: only meaningful for sections with real data,
+            # and only where high entropy is not simply how the section is
+            # built. A compressed .rsrc is what every icon looks like.
+            if section.SizeOfRawData >= 4096 and lowered not in _ENTROPY_EXEMPT_SECTIONS:
                 try:
                     entropy = section.get_entropy()
                 except Exception:
@@ -163,8 +221,8 @@ class PEHeuristicDetector(Detector):
                     high_entropy.append(f"{raw_name}:{entropy:.2f}")
 
             characteristics = section.Characteristics
-            is_write = bool(characteristics & 0x80000000)
-            is_exec = bool(characteristics & 0x20000000)
+            is_write = bool(characteristics & _SCN_MEM_WRITE)
+            is_exec = bool(characteristics & _SCN_MEM_EXECUTE)
             if is_write and is_exec:
                 writable_executable.append(raw_name)
 
@@ -216,15 +274,27 @@ class PEHeuristicDetector(Detector):
         imports: set[str] = set()
         entries = getattr(pe, "DIRECTORY_ENTRY_IMPORT", None)
         if entries is None:
-            # No import table at all. Normal for .NET assemblies and some
-            # drivers, but also what a fully packed binary looks like.
-            if not getattr(pe, "DIRECTORY_ENTRY_DELAY_IMPORT", None):
+            # No import table. Only interesting in a binary that *contains
+            # code*: a packed executable resolves its imports after
+            # unpacking, so the table is missing where one should be.
+            #
+            # Two large populations import nothing for entirely ordinary
+            # reasons, and flagging them cost a tenth of System32 before
+            # these checks were added. Resource-only DLLs — string tables,
+            # icon packs, MUI files — hold no code to import anything for.
+            # .NET assemblies resolve everything through the CLR.
+            if (
+                not getattr(pe, "DIRECTORY_ENTRY_DELAY_IMPORT", None)
+                and _carries_code(pe)
+                and not _is_dotnet(pe)
+            ):
                 out.append(
                     self.detection(
                         "Heuristic.NoImportTable",
                         30.0,
-                        "The binary imports nothing, which usually means its real "
-                        "imports are resolved at runtime after unpacking.",
+                        "The binary contains code but imports nothing, which usually "
+                        "means its real imports are resolved at runtime after "
+                        "unpacking.",
                     )
                 )
             return out
@@ -249,19 +319,20 @@ class PEHeuristicDetector(Detector):
             out.append(
                 self.detection(
                     "Heuristic.ProcessInjection.Partial",
-                    35.0,
-                    "Imports several process-manipulation APIs.",
+                    20.0,
+                    "Imports several process-manipulation APIs. Hooking and "
+                    "accessibility software does this legitimately.",
                     apis=sorted(injection),
                 )
             )
 
         anti = imports & ANTI_ANALYSIS_IMPORTS
-        if len(anti) >= 3:
+        if len(anti) >= 2:
             out.append(
                 self.detection(
                     "Heuristic.AntiDebug",
-                    40.0,
-                    "Imports several debugger-detection APIs.",
+                    35.0,
+                    "Imports APIs used to detect or obstruct a debugger.",
                     apis=sorted(anti),
                 )
             )
@@ -295,7 +366,11 @@ class PEHeuristicDetector(Detector):
                 )
                 for s in pe.sections
             )
-            if pe.sections and not in_section:
+            # Zero is not an entry point pointing somewhere strange, it is the
+            # documented way of saying there is no entry point at all —
+            # standard for resource-only DLLs, which have no code to enter.
+            # Reading it as an address flagged a twentieth of System32.
+            if entry_point and pe.sections and not in_section:
                 out.append(
                     self.detection(
                         "Heuristic.EntryPointOutsideSections",

@@ -216,6 +216,50 @@ Three properties are load-bearing:
    `Trojan.*`" is not a switch anyone should be able to flip remotely, and a
    list arriving with more than 10,000 entries is rejected whole.
 
+## The guard list, and who is allowed to act
+
+`engine/guard.py`. One failure mode ends a project like this: a signature is
+wrong, it matches something the operating system needs, the file is
+quarantined, and a stranger's machine will not boot. They cannot undo it —
+the computer that would run the undo is the one that will not start.
+
+So acting on a file requires passing two independent gates, and a detector
+being confident is only one of them.
+
+**Gate one — is this file allowed to be touched at all?** `Guard.check` is
+called inside `Quarantine.quarantine()`, not by its callers, so every route
+into the vault goes through it and none can forget to. There is no setting to
+disable it. Protected: operating-system directories, Sentinel's own install
+and data directories, filesystem roots, anything that is not an ordinary
+file, and OS-vendor-signed binaries. Application directories such as
+`Program Files` are deliberately not protected — malware installs there
+routinely, and blanket-protecting application space would blind the scanner
+to a whole class of real threats to buy protection the OS directories already
+give.
+
+**Gate two — is this finding certain enough to act on?** Only *conclusive*
+detections, meaning an exact digest match against a known sample, are acted
+on automatically. Heuristics never are, however many fire. Six independent
+script heuristics aggregate to 93, which is CRITICAL and clears any severity
+threshold, and each one is a guess about what code looks like rather than
+knowledge of what it is. Those findings are reported in full and left alone.
+
+The two gates fail differently on purpose. A guarded file is marked
+`protected`, not `quarantine-failed`: a refusal that protected the user is
+not an error they need to chase.
+
+### Why heuristics are suppressed on vendor-signed binaries
+
+Structural heuristics are near-worthless applied to the operating system's
+own components. Windows' App-V subsystem imports the complete
+process-injection API set — `VirtualAllocEx`, `WriteProcessMemory`,
+`CreateRemoteThread` — because injecting into processes is precisely what it
+exists to do. So a non-conclusive finding on a binary signed by the OS vendor
+is dropped. Conclusive detections are not: certificates get stolen, but not
+the OS vendor's. The check costs about 2ms, and is reached only when
+something was already going to be reported, so the overwhelmingly common case
+— a clean file — never pays for it.
+
 ## Quarantine
 
 `engine/quarantine.py`. Files move into a vault under the data directory,

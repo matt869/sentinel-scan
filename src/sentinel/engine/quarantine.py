@@ -44,6 +44,7 @@ from typing import Any, BinaryIO
 
 from sentinel.core.events import EventBus, EventType
 from sentinel.core.logger import get_logger
+from sentinel.engine.guard import Guard, GuardHit
 from sentinel.engine.verdict import Severity, Verdict
 
 log = get_logger(__name__)
@@ -63,6 +64,20 @@ CHUNK_SIZE = 1024 * 1024
 
 class QuarantineError(RuntimeError):
     """Raised when a quarantine operation cannot be completed."""
+
+
+class QuarantineRefused(QuarantineError):  # noqa: N818 - already an ...Error subclass
+    """Raised when the guard list forbids touching a file.
+
+    A subclass so existing handlers keep working, but a distinct type so a
+    front end can tell "we will not do this" apart from "we tried and it
+    broke". Those need different words: one is a deliberate refusal that
+    protects the user, the other is a failure they may need to act on.
+    """
+
+    def __init__(self, hit: GuardHit) -> None:
+        super().__init__(hit.describe())
+        self.hit = hit
 
 
 @dataclass(slots=True)
@@ -96,13 +111,22 @@ class QuarantineEntry:
 class Quarantine:
     """Manages the vault directory and its database index."""
 
-    def __init__(self, config: Any, db: Any, bus: EventBus | None = None) -> None:
+    def __init__(
+        self,
+        config: Any,
+        db: Any,
+        bus: EventBus | None = None,
+        guard: Guard | None = None,
+    ) -> None:
         self.config = config
         self.db = db
         self.bus = bus
         self.directory = Path(config.paths.quarantine_dir)
         self.directory.mkdir(parents=True, exist_ok=True)
         self._key: bytes | None = None
+        #: Files this vault will refuse to touch. Injectable for tests; there
+        #: is deliberately no configuration switch to turn it off.
+        self.guard = guard if guard is not None else Guard(config)
 
     # -- key management ------------------------------------------------
 
@@ -160,15 +184,23 @@ class Quarantine:
                 copy instead of move (used by ``--dry-run``).
 
         Raises:
+            QuarantineRefused: the guard list forbids touching this file.
             QuarantineError: the file could not be read or stored.
         """
         source = Path(verdict.path)
         if not source.is_file():
             raise QuarantineError(f"{source} is not a file")
 
-        # Never quarantine our own vault, database or key.
-        if self._is_own_file(source):
-            raise QuarantineError(f"refusing to quarantine Sentinel's own file {source}")
+        # The guard list, and it is not advisory. Every path into this method
+        # goes through here, so a detector being wrong about an operating
+        # system file cannot cost somebody their machine. Deliberately a
+        # second, independent check rather than something the caller opts
+        # into — the case it exists for is precisely the one where the
+        # detection logic is mistaken.
+        guarded = self.guard.check(source)
+        if guarded is not None:
+            log.warning("refusing to quarantine %s — %s", source, guarded)
+            raise QuarantineRefused(guarded)
 
         token = secrets.token_hex(16)
         nonce = secrets.token_bytes(NONCE_SIZE)
@@ -457,16 +489,6 @@ class Quarantine:
         return [p for p in self.directory.glob("*.quar") if p.name not in known]
 
     # -- helpers -------------------------------------------------------
-
-    def _is_own_file(self, path: Path) -> bool:
-        """True if *path* is part of Sentinel's own data directory."""
-        try:
-            resolved = path.resolve()
-            data_dir = Path(self.config.paths.data_dir).resolve()
-            resolved.relative_to(data_dir)
-            return True
-        except (ValueError, OSError):
-            return False
 
     def _emit(self, event: EventType, **payload: Any) -> None:
         if self.bus is not None:

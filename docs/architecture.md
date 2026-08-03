@@ -323,6 +323,61 @@ data-derived string is passed through `rich.markup.escape`. Without it,
 engine threads. Importing `sentinel.ui` does not import PySide6, so the CLI
 works on a machine with no Qt.
 
+### The tray, and why its state is derived
+
+`ui/tray_state.py` holds no Qt at all, because the interesting part is a
+decision rather than a widget.
+
+Several things are true at once. A scan is running, two files are in the
+vault from yesterday, and the threat list is nine days old — three truths and
+one icon. The classic antivirus bug is to track the *last event* instead: the
+scan finishes clean, so the icon goes green, and the two files nobody has
+looked at disappear from the user's awareness. They believe they are fine.
+
+So `TrayStatus` is a frozen snapshot of every fact, constructed fresh from
+the world by `status_from_world` rather than mutated by events, and
+`TrayStatus.state` picks the icon by priority:
+
+```
+THREAT  >  DISABLED  >  SCANNING  >  ATTENTION  >  SAFE
+```
+
+`SAFE` is last, so it is reachable only when nothing else is true. The
+tooltip then carries the facts that lost, because the reason the priority
+list exists is that more than one thing is true and the losers still matter.
+`headline` and `detail` test their conditions in the same order, so the two
+lines always describe the same thing.
+
+### Icons at 16 pixels
+
+`ui/icons.py` draws rather than ships bitmaps: a tray icon has to be correct
+at 16px on a 100% display and 44px on a 275% one, and scaling one image
+between those looks like a smudge.
+
+They are distinguished by **silhouette first, colour second, glyph third**.
+At 16px in peripheral vision colour is the least reliable signal available —
+6-8% of men cannot separate the coral from the jade, and a dark taskbar
+drains apparent saturation. So: solid shield for `SAFE`, a ring for
+`SCANNING`, outline-only for `DISABLED`, and a badge notched into the outline
+for the two that need attention.
+
+`THREAT` and `ATTENTION` are the pair at risk of collapsing together, since
+both are "filled shield with a badge". The glyph cannot separate them — at
+16px it is about seven pixels across — so the **badge outline** differs: a
+circle for threat, a triangle for attention, which is also the convention
+from every other piece of software. `tests/test_tray.py` renders all ten
+pairs in greyscale at 16px and fails if fewer than 30 of 256 pixels differ.
+
+### The resource line
+
+`system/resources.py`, shown permanently in the flyout. Unusual, and
+deliberate: the people this is for are on 4 GB and a spinning disk, many have
+been burned by security software that ate their computer, and they have no
+way to check whether this one does the same. So the number is always visible
+and never flattering — no smoothing that hides a spike, no `<1%` floor, and
+CPU as a share of one core, which is what the eco-mode budget is written in
+and what Task Manager will agree with.
+
 ## Server
 
 Optional FastAPI service under `server/`. Collects reports, serves hash

@@ -405,3 +405,72 @@ QToolTip {
     border: 1px solid #4c566a;
     padding: 5px 7px;
 }
+
+/* --------------------------------------------------------------- flyout */
+/*
+    The tray panel. Most people will never see anything else, so it gets
+    more air than the main window: one answer, one detail, one button.
+
+    The card itself is painted in Flyout.paintEvent rather than styled here,
+    because rounded translucent corners do not survive a QSS background on
+    every platform.
+*/
+
+QFrame#flyoutCard {
+    background: transparent;
+}
+
+QFrame#flyoutCard QLabel {
+    background: transparent;
+}
+
+QLabel#flyoutHeadline {
+    font-size: 19px;
+    font-weight: 600;
+    color: #eceff4;
+}
+
+QLabel#flyoutDetail {
+    font-size: 13px;
+    color: #949cab;
+}
+
+/*
+    The resource line. Deliberately quiet — it is reassurance, not a
+    headline — but always present, and monospaced so the digits stop
+    jittering as they change.
+*/
+QLabel#flyoutResources {
+    font-family: "Cascadia Mono", "Consolas", "Menlo", monospace;
+    font-size: 11px;
+    color: #79808d;
+}
+
+QPushButton#flyoutPrimary {
+    background-color: #3b4252;
+    border: none;
+    border-radius: 8px;
+    color: #eceff4;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+QPushButton#flyoutPrimary:hover {
+    background-color: #49546a;
+}
+
+QPushButton#flyoutPrimary:pressed {
+    background-color: #333c4d;
+}
+
+QPushButton#flyoutLink {
+    background: transparent;
+    border: none;
+    color: #79808d;
+    font-size: 11px;
+    padding: 2px 4px;
+}
+
+QPushButton#flyoutLink:hover {
+    color: #d8dee9;
+}

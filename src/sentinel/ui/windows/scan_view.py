@@ -198,6 +198,14 @@ class ScanView(QWidget):
     def _on_start(self) -> None:
         self.scan_requested.emit(self._roots(), self.check_quarantine.isChecked())
 
+    def default_roots(self) -> list[str]:
+        """What a scan started from the tray should look at.
+
+        Whatever the user last chose here, so "Check my computer" in the
+        flyout does the same thing as the button they can see.
+        """
+        return self._roots()
+
     def _roots(self) -> list[str]:
         if self.radio_custom.isChecked():
             return list(self._custom_paths)

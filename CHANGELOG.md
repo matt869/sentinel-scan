@@ -10,6 +10,44 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Added — the tray and the flyout
+
+- **The tray icon**, with additive state. A scan running, two files in the
+  vault and a nine-day-old threat list are three simultaneous truths and one
+  icon: priority picks what is shown, and the tooltip carries the rest. State
+  is derived from every fact at once rather than nudged by the last event,
+  which is what stops the classic antivirus bug — a finished scan flipping the
+  icon green while quarantined files nobody has looked at vanish from
+  awareness. `SAFE` is the lowest priority in the list and is reachable only
+  when nothing else is true.
+- **The flyout**: a 360x428 panel on left-click. One status line, one detail
+  line, one button, and the resource line. Forcing a full window on "am I
+  okay?" is a tax people pay once and then stop paying.
+- **Tray icons drawn rather than shipped**, at six sizes, distinguished by
+  silhouette first and colour second — colour is the least reliable signal at
+  16 pixels in peripheral vision. Filled shield for safe, a ring for
+  scanning, outline only for disabled, and badged for the two that need you:
+  a *circle* badge for a threat, a *triangle* for attention, because the
+  glyph inside is unreadable at 16px and the badge outline is not.
+  `tests/test_tray.py` renders every pair in greyscale at 16px and fails if
+  any two are too similar.
+- **The resource line**: `0.4% CPU · 84 MB`, permanent, in the flyout. Never
+  rounded up, never floored at "<1%", never smoothed to hide a spike. The
+  people this is built for have been burned by security software that ate
+  their computer and have no way to check whether this one does the same.
+- **Notification tiers.** Silent for anything that went right — a scan
+  starting, a scan finishing clean, the threat list updating. Toasts are
+  capped at three per rolling hour and then coalesce, so ten threats in one
+  scan produce one notification. Silence is the feature: an application quiet
+  for weeks is one you believe when it finally speaks.
+- Closing the window now hides it to the tray rather than quitting. Quit is
+  explicit, from the tray menu.
+
+### Known
+
+- Idle memory measures ~107 MB with the GUI open, against a budget of 90 MB.
+  Surfaced by the resource line, which is the point of it.
+
 ### Security
 
 Three of the four defenses the project requires before it has users were

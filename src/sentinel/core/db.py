@@ -184,8 +184,13 @@ class Database:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            # 8 MiB page cache; the findings queries are the only heavy ones.
-            conn.execute("PRAGMA cache_size=-8000")
+            # 2 MiB page cache, and the number is per *connection* — this
+            # class opens one per thread, so a sixteen-worker scan was
+            # reserving 128 MiB of page cache against a 250 MiB peak budget.
+            # The hot query during a scan is an indexed lookup in scan_cache,
+            # which needs the index pages resident and little else; the
+            # findings queries that wanted a big cache run once at the end.
+            conn.execute("PRAGMA cache_size=-2000")
             self._local.conn = conn
         return conn
 

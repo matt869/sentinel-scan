@@ -351,3 +351,70 @@ class TestIcons:
 
         icon = icon_for(TrayState.SAFE)
         assert len(icon.availableSizes()) == len(ICON_SIZES)
+
+
+# ----------------------------------------------------------------------
+# the window is built only when it is wanted
+# ----------------------------------------------------------------------
+
+class TestLazyWindow:
+    """The main window costs ~18 MB that most users never look at.
+
+    The design says the flyout *is* the application and the window is one
+    click away for the rare occasion somebody needs it. Building it at
+    startup spends that memory on everybody to save a moment for the few,
+    and idle RAM is a budget with a number on it.
+    """
+
+    @pytest.fixture
+    def controller(
+        self, qt_app: Any, config: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> Any:
+        from sentinel.ui import tray as tray_module
+        from sentinel.ui.app import SentinelApp
+
+        # Offscreen Qt reports no tray, which would send the controller down
+        # its windowed fallback and defeat the point of the test.
+        monkeypatch.setattr(
+            tray_module.SentinelTray, "available", staticmethod(lambda: True)
+        )
+        app = SentinelApp(config)
+        yield app
+        app.db.close()
+
+    def test_startup_does_not_build_the_window(self, controller: Any) -> None:
+        assert controller.tray is not None
+        assert not controller.has_window
+
+    def test_the_window_appears_on_request(self, controller: Any) -> None:
+        window = controller.window()
+        assert controller.has_window
+        assert window is not None
+
+    def test_the_window_is_built_once(self, controller: Any) -> None:
+        assert controller.window() is controller.window()
+
+    def test_the_tray_works_before_any_window_exists(self, controller: Any) -> None:
+        # The whole point: a user who never opens the window still gets a
+        # correct icon and tooltip.
+        controller.refresh_tray()
+        assert not controller.has_window
+        assert controller.tray.tray.toolTip().startswith("Sentinel Scan")
+
+    def test_no_tray_falls_back_to_the_window(
+        self, qt_app: Any, config: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Several Linux sessions have no tray. The application must not
+        # become unreachable.
+        from sentinel.ui import tray as tray_module
+        from sentinel.ui.app import SentinelApp
+
+        monkeypatch.setattr(
+            tray_module.SentinelTray, "available", staticmethod(lambda: False)
+        )
+        app = SentinelApp(config)
+        try:
+            assert app.tray is None
+            assert app.has_window
+        finally:
+            app.db.close()

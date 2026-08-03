@@ -350,6 +350,33 @@ data-derived string is passed through `rich.markup.escape`. Without it,
 engine threads. Importing `sentinel.ui` does not import PySide6, so the CLI
 works on a machine with no Qt.
 
+### Why the window is lazy
+
+`SentinelApp` in `ui/app.py` owns the tray, the database and the machine
+tuning. The main window is *not* built until something asks for it — the
+first time it is opened, a scan is started from the tray, or the desktop
+turns out to have no tray at all.
+
+This is a memory decision with a number behind it. Measured per layer, in
+separate interpreters so allocator reuse cannot blur the boundaries:
+
+```
+Python interpreter          17.6 MB
++ Qt                       +23.8
++ stylesheet                +8.1
++ database                  +1.4
++ the four window pages    +12.2      <- most users never look at these
++ tray + flyout             +2.8
+```
+
+The window costs around 18 MB fully assembled, on machines where idle RAM is
+a budget with a number on it, to serve an interaction the design already says
+is rare. Idle is 66 MB with the tray alone against a 90 MB budget; with the
+window open and shown it is 89.7 MB, still inside it.
+
+Once built the window stays: somebody who has opened it once will open it
+again, and rebuilding is slower than keeping.
+
 ### The tray, and why its state is derived
 
 `ui/tray_state.py` holds no Qt at all, because the interesting part is a

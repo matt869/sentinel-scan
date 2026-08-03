@@ -20,7 +20,7 @@ from sentinel.version import __version__
 log = get_logger(__name__)
 
 try:
-    from PySide6.QtCore import QObject, QThread, Signal
+    from PySide6.QtCore import QObject, QThread, QTimer, Signal
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
@@ -43,6 +43,11 @@ except ImportError as exc:  # pragma: no cover - depends on the environment
 
 APPLICATION_NAME = "Sentinel Scan"
 ORGANISATION_NAME = "sentinel-scan"
+
+#: How often the tray re-derives its state from the world. Slow enough to be
+#: free at idle, fast enough that a vault emptied elsewhere is reflected
+#: before the user goes looking for it.
+TRAY_REFRESH_MS = 15_000
 
 
 class ScanWorker(QObject):
@@ -203,6 +208,133 @@ def load_stylesheet() -> str:
         return ""
 
 
+class SentinelApp(QObject):
+    """Owns the tray, and builds the main window only if it is asked for.
+
+    The split exists for memory. On the machines this is built for, idle RAM
+    is a budget with a number on it, and the main window's four pages cost
+    around 35 MB that most users never look at — the design says the flyout
+    *is* the application and the window is one click away for the rare
+    occasion somebody needs it. Constructing it at startup spends that on
+    everybody to save a moment for the few.
+
+    So the tray comes up alone, and :meth:`window` builds the rest on first
+    use. After that it stays: somebody who has opened it once will open it
+    again, and rebuilding is slower than keeping.
+    """
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        from sentinel.core.db import Database
+        from sentinel.system.hardware import tune_once
+        from sentinel.ui.tray import SentinelTray, status_from_world
+
+        self.config = config
+        self.db = Database(config.paths.db_file)
+        self._status_from_world = status_from_world
+        self._window: Any = None
+        self._quitting = False
+
+        # Measured before anything is shown, so the first scan uses the
+        # settings chosen for this machine rather than the defaults.
+        self.tuning = tune_once(config, self.db)
+
+        self.tray: Any = None
+        if SentinelTray.available():
+            self.tray = SentinelTray(self)
+            self.tray.scan_requested.connect(self.scan_now)
+            self.tray.open_requested.connect(self.show_window)
+            self.tray.review_requested.connect(self.review)
+            self.tray.quit_requested.connect(self.quit)
+            self.tray.show()
+
+            self._timer = QTimer(self)
+            self._timer.setInterval(TRAY_REFRESH_MS)
+            self._timer.timeout.connect(self.refresh_tray)
+            self._timer.start()
+            self.refresh_tray()
+        else:
+            log.info("no system tray on this desktop; opening the window")
+            self.show_window()
+
+    # -- the window ----------------------------------------------------
+
+    @property
+    def has_window(self) -> bool:
+        return self._window is not None
+
+    def window(self) -> Any:
+        """The main window, built on first request."""
+        if self._window is None:
+            from sentinel.ui.windows.main_window import MainWindow
+
+            log.debug("building the main window")
+            self._window = MainWindow(self.config, controller=self)
+        return self._window
+
+    def show_window(self) -> None:
+        window = self.window()
+        window.showNormal()
+        window.raise_()
+        window.activateWindow()
+
+    def review(self) -> None:
+        """Open on whichever page has the thing needing attention."""
+        self.show_window()
+        try:
+            row = 2 if self.db.list_quarantine() else 1
+        except Exception:
+            row = 1
+        self._window.sidebar.setCurrentRow(row)
+
+    def scan_now(self) -> None:
+        """Start (or stop) a scan, building the window if it does not exist.
+
+        The window carries the scan machinery, so a scan from the tray costs
+        the memory the tray was saving — but only while somebody is actually
+        scanning, which is what the peak budget is for.
+        """
+        window = self.window()
+        if window.controller.is_running:
+            window.controller.cancel()
+            return
+        window.start_default_scan()
+
+    # -- tray ----------------------------------------------------------
+
+    def refresh_tray(self) -> None:
+        if self.tray is None:
+            return
+        window = self._window
+        try:
+            status = self._status_from_world(
+                self.config, self.db,
+                scanning=bool(window and window.controller.is_running),
+                scan_fraction=getattr(window, "_scan_fraction", None),
+                scan_eta_seconds=getattr(window, "_scan_eta", None),
+                unresolved_threats=window.unresolved_threats() if window else 0,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("cannot refresh the tray: %s", exc)
+            return
+        self.tray.set_status(status)
+
+    # -- shutdown ------------------------------------------------------
+
+    @property
+    def quitting(self) -> bool:
+        return self._quitting
+
+    def quit(self) -> None:
+        self._quitting = True
+        if self._window is not None:
+            self._window.close()
+        if self.tray is not None:
+            self.tray.hide()
+        self.db.close()
+        QApplication.quit()
+
+
 def main(config_file: str | None = None) -> int:
     """Launch the desktop application. Returns a process exit code."""
     if not PYSIDE_AVAILABLE:
@@ -214,8 +346,6 @@ def main(config_file: str | None = None) -> int:
         )
         return 2
 
-    from sentinel.ui.windows.main_window import MainWindow
-
     config = load_config(config_file)
     config.paths.ensure()
     setup_logging(config.log_level, config.paths.log_file, force=True)
@@ -225,6 +355,9 @@ def main(config_file: str | None = None) -> int:
     app.setApplicationDisplayName(APPLICATION_NAME)
     app.setOrganizationName(ORGANISATION_NAME)
     app.setApplicationVersion(__version__)
+    # The tray keeps the process alive on its own; without this, hiding the
+    # window would quit the application.
+    app.setQuitOnLastWindowClosed(False)
 
     stylesheet = load_stylesheet()
     if stylesheet:
@@ -234,8 +367,8 @@ def main(config_file: str | None = None) -> int:
     if not icon.isNull():
         app.setWindowIcon(icon)
 
-    window = MainWindow(config)
-    window.show()
+    controller = SentinelApp(config)
+    app.aboutToQuit.connect(controller.db.close)
 
     log.info("GUI started (Sentinel Scan %s)", __version__)
     return app.exec()

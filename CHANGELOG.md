@@ -10,6 +10,37 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Changed — idle memory: 107 MB → 66 MB
+
+The only performance budget the project was breaching. Profiled rather than
+guessed at, by measuring each layer in its own interpreter:
+
+| | |
+|---|---|
+| Python interpreter | 17.6 MB |
+| Qt | +23.8 |
+| stylesheet | +8.1 |
+| database | +1.4 |
+| the four window pages | +12.2 |
+| tray + flyout | +2.8 |
+
+- **The main window is now built on first request, not at startup.** The
+  design already said the flyout *is* the application and the window is one
+  click away for the rare occasion somebody needs it — but it was constructed
+  and shown on every launch anyway, spending ~18 MB on everybody to save a
+  moment for the few. `SentinelApp` owns the tray and the database; the window
+  is created the first time it is opened, a scan is started, or a desktop
+  turns out to have no tray at all. Idle is **66 MB**; even with the window
+  open and shown it is 89.7 MB, inside the budget.
+- **`PRAGMA cache_size` cut from 8 MiB to 2 MiB.** The number is per
+  *connection* and this class opens one per thread, so a sixteen-worker scan
+  was reserving 128 MiB of page cache against a 250 MiB peak budget. The hot
+  query during a scan is an indexed `scan_cache` lookup that needs index pages
+  and little else. Measured peak on a 253 MB tree is now 39.4 MB.
+- Closing the window hides it; the process stays alive on the tray, and
+  `setQuitOnLastWindowClosed(False)` stops Qt ending the application when the
+  last window goes away.
+
 ### Added — auto-configuration
 
 - **Sentinel measures the machine at first launch and picks its own

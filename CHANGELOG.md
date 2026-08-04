@@ -61,7 +61,7 @@ holding those two problems separately.
   overnight with nobody in the room is busy but idle. A platform that cannot
   tell reports so, and unknown counts as *the user is present*.
 
-Two bugs found and fixed while writing the tests, both of the kind that
+Five bugs found and fixed while writing the tests, all of the kind that
 produce no error and no log line:
 
 - `GetTickCount` wraps every 49.7 days, and the value `GetLastInputInfo`
@@ -73,6 +73,18 @@ produce no error and no log line:
   blocked the very loop whose job is noticing that the user has come back.
   The scan would have run to completion under somebody who had sat back down
   — precisely the thing the scheduler exists to prevent.
+- Parked workers each forced their own sample of the machine. Eight workers
+  meant eight reads per interval, and `cpu_percent` diffs against its own
+  previous call — so seven of them returned near-zero, and the governor would
+  have concluded the machine was idle *because* it was asking too often.
+- `close()` broadcast a wakeup, but a parked worker only leaves when the
+  budget lets it run again, so closing a paused governor stranded every
+  worker in the loop. Shutting down mid-pause is exactly when somebody is
+  waiting for the app to exit.
+- One worker clearing the shared wakeup event could swallow a wakeup meant
+  for the others, who then slept out the full pause after the reason for it
+  had gone. Replaced with a `Condition` and `notify_all`, which has no such
+  window.
 
 ### Changed — idle memory: 107 MB → 66 MB
 

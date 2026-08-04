@@ -269,16 +269,23 @@ class ThrottleGovernor:
         self._sensors = sensors if sensors is not None else _Sensors()
         self._clock = clock or time.monotonic
         self._lock = threading.RLock()
-        #: Set whenever the pace changes, so a worker parked in a long pause
-        #: wakes as soon as the user leaves rather than serving out a sleep
-        #: chosen under conditions that no longer hold.
-        self._wake = threading.Event()
+        #: Broadcast whenever the pace changes, so workers waiting out a pause
+        #: react at once rather than serving out a sleep chosen under
+        #: conditions that no longer hold.
+        #:
+        #: A ``Condition`` rather than an ``Event`` because there are many
+        #: waiters. An event has to be cleared before each wait, and with N
+        #: workers one of them clearing it can swallow a wakeup meant for the
+        #: others — they then sleep out the full pause after the reason for it
+        #: has gone. ``notify_all`` has no such window.
+        self._changed = threading.Condition(self._lock)
 
         self._budget = Budget(Pace.FULL, 1.0, "no measurement yet")
         self._sampled_at: float | None = None
         self._calm_since: float | None = None
         self._manual_pause = False
         self._background_io = False
+        self._closed = False
 
     # -- public API ----------------------------------------------------
 
@@ -352,9 +359,22 @@ class ThrottleGovernor:
             return self._manual_pause
 
     def close(self) -> None:
-        """Hand back background I/O priority and release parked workers."""
+        """Hand back background I/O priority and release parked workers.
+
+        The release is a flag, not just a broadcast. A parked worker leaves
+        only when the budget lets it run again, so closing a governor that is
+        paused — shutting down mid-pause, which is exactly when a user is
+        waiting for the app to exit — would otherwise strand every worker in
+        the loop forever.
+        """
+        with self._changed:
+            self._closed = True
+            self._changed.notify_all()
         self._set_background_io(False)
-        self._wake.set()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def __enter__(self) -> ThrottleGovernor:
         return self
@@ -440,7 +460,7 @@ class ThrottleGovernor:
         # on for the whole scan: while nobody is at the machine there is no
         # one to yield to, and yielding anyway just makes the scan longer.
         self._set_background_io(_RANK[budget.pace] <= _RANK[Pace.BACKGROUND])
-        self._wake.set()
+        self._changed.notify_all()
 
     # -- sleeping ------------------------------------------------------
 
@@ -449,23 +469,33 @@ class ThrottleGovernor:
         if seconds <= 0:
             return 0.0
         started = self._clock()
-        self._wake.clear()
-        self._wake.wait(seconds)
+        with self._changed:
+            if not self._closed:
+                self._changed.wait(seconds)
         return self._clock() - started
 
     def _park(self) -> float:
         """Wait out a pause, rechecking periodically.
 
-        Bounded rather than waiting on the event alone: the condition that
-        caused the pause — a battery, a busy machine — changes without
-        anything calling us, so a parked worker has to come back and look.
+        Bounded rather than waiting on the broadcast alone: the condition that
+        caused the pause — a battery charging, a busy machine going quiet —
+        changes without anything calling us, so a parked worker has to come
+        back and look.
+
+        The recheck is a plain ``budget()``, deliberately not forced. Forcing
+        it makes every parked worker take its own sample, so eight workers
+        produce eight reads per interval instead of one — and ``cpu_percent``
+        diffs against its previous call, so sampling it eight times in a row
+        returns near-zero for seven of them. The governor would then conclude
+        the machine was idle *because* it was asking too often.
         """
         started = self._clock()
-        while True:
-            self._wake.clear()
-            self._wake.wait(self.sample_interval)
-            if self.budget(force=True).running:
-                return self._clock() - started
+        with self._changed:
+            while not self._closed:
+                if self.budget().running:
+                    break
+                self._changed.wait(self.sample_interval)
+        return self._clock() - started
 
     # -- Windows background I/O ----------------------------------------
 

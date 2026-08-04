@@ -235,7 +235,8 @@ def test_the_pause_is_proportional_to_the_work(monkeypatch: pytest.MonkeyPatch,
     """
     slept: list[float] = []
     monkeypatch.setattr(
-        threading.Event, "wait", lambda self, timeout=None: slept.append(timeout or 0.0)
+        threading.Condition, "wait",
+        lambda self, timeout=None: slept.append(timeout or 0.0),
     )
 
     sensors = FakeSensors(Reading(system_cpu=5.0, own_cpu=0.0, idle_seconds=3))
@@ -258,7 +259,8 @@ def test_one_expensive_file_cannot_stall_the_pipeline(
     """
     slept: list[float] = []
     monkeypatch.setattr(
-        threading.Event, "wait", lambda self, timeout=None: slept.append(timeout or 0.0)
+        threading.Condition, "wait",
+        lambda self, timeout=None: slept.append(timeout or 0.0),
     )
 
     sensors = FakeSensors(Reading(system_cpu=95.0, own_cpu=1.0, idle_seconds=0))
@@ -344,6 +346,84 @@ def test_duty_cycles_are_ordered_with_the_paces() -> None:
     assert duties == sorted(duties)
     assert _DUTY[Pace.PAUSED] == 0.0
     assert _DUTY[Pace.FULL] == 1.0
+
+
+def test_parked_workers_do_not_each_take_their_own_sample(
+    clock: FakeClock,
+) -> None:
+    """Eight parked workers must not mean eight sensor reads per interval.
+
+    ``cpu_percent`` diffs against its own previous call, so sampling it eight
+    times in a row returns near-zero for seven of them — and the governor
+    would conclude the machine was idle *because* it was asking too often.
+    """
+    sensors = FakeSensors(Reading(system_cpu=1.0, own_cpu=0.0, idle_seconds=9999))
+    gov = governor(sensors, clock, sample_interval=0.01)
+    gov.pause()
+    reads_before = sensors.reads
+
+    workers = [threading.Thread(target=gov.wait_turn, args=(0.1,), daemon=True)
+               for _ in range(8)]
+    for worker in workers:
+        worker.start()
+
+    # Let them all settle into the park loop and spin a few times over.
+    threading.Event().wait(0.3)
+    parked_reads = sensors.reads - reads_before
+
+    gov.resume()
+    for worker in workers:
+        worker.join(timeout=2.0)
+        assert not worker.is_alive()
+
+    # The clock is frozen, so a correctly rate-limited governor takes no new
+    # samples at all while parked. Forcing each recheck took one per worker
+    # per loop, which ran into the hundreds here.
+    assert parked_reads <= 1, f"{parked_reads} samples taken by 8 parked workers"
+
+
+def test_closing_releases_a_worker_parked_in_a_pause(clock: FakeClock) -> None:
+    """Shutting down mid-pause is exactly when someone is waiting to quit."""
+    sensors = FakeSensors(Reading(system_cpu=1.0, own_cpu=0.0, idle_seconds=9999))
+    gov = governor(sensors, clock, sample_interval=0.01)
+    gov.pause()
+
+    released = threading.Event()
+
+    def worker() -> None:
+        gov.wait_turn(0.1)
+        released.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    assert not released.wait(0.1), "the worker left a pause it was never released from"
+
+    gov.close()
+    assert released.wait(2.0), "close() stranded a parked worker"
+    thread.join(timeout=1.0)
+    assert gov.closed
+
+
+def test_a_closed_governor_stops_throttling(clock: FakeClock) -> None:
+    """Nothing may sit in a sleep after shutdown has been asked for."""
+    sensors = FakeSensors(Reading(system_cpu=95.0, own_cpu=1.0, idle_seconds=0))
+    gov = governor(sensors, clock)
+    assert gov.budget(force=True).pace is Pace.BACKGROUND
+    gov.close()
+
+    started = threading.Event()
+    finished = threading.Event()
+
+    def worker() -> None:
+        started.set()
+        gov.wait_turn(5.0)
+        finished.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    assert started.wait(2.0)
+    assert finished.wait(2.0), "a closed governor still served out a long pause"
+    thread.join(timeout=1.0)
 
 
 # ----------------------------------------------------------------------

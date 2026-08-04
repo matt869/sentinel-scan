@@ -218,6 +218,19 @@ capped at `MAX_PAUSE_SECONDS`, so the duty cycle is a target rather than a
 guarantee — a forty-second file at 15% would otherwise earn a
 226-second pause, and a scan that looks hung is a scan the user kills.
 
+Workers waiting out a pause share a `Condition`, not an `Event`, and their
+recheck is a plain `budget()` rather than a forced one. Both follow from there
+being many waiters rather than one. An event has to be cleared before each
+wait, so with N workers one of them clearing it can swallow a wakeup meant for
+the others, who then sleep out the full pause after the reason for it has
+gone. And forcing the recheck makes every parked worker take its own sample —
+eight workers, eight reads per interval — while `cpu_percent` diffs against
+its own previous call, so seven of those return near-zero and the governor
+concludes the machine is idle *because* it is asking too often. `close()`
+sets a flag as well as broadcasting, since a parked worker otherwise leaves
+only when the budget lets it run, and shutting down mid-pause is exactly when
+somebody is waiting for the app to exit.
+
 `Pace` defines an explicit `_RANK` rather than comparing values. It subclasses
 `str`, so default ordering is lexicographic, under which `"half" < "full"` is
 `False` and the hysteresis silently inverts for exactly one of the four

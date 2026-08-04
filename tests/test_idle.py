@@ -378,6 +378,66 @@ def test_repeated_short_interruptions_widen_the_idle_threshold(
     assert sched.away_after > 300.0
 
 
+def test_the_interruption_count_is_not_re_read_on_every_tick(
+    clock: FakeClock,
+) -> None:
+    """It is read twice a second forever; that must not be a SQLite query."""
+    class CountingDb(FakeDb):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        def get_setting(self, key: str, default: str | None = None) -> str | None:
+            if key == INTERRUPTIONS_KEY:
+                self.reads += 1
+            return super().get_setting(key, default)
+
+    db = CountingDb()
+    sched = scheduler(lambda *a: ScanOutcome(True), clock, db)
+    for _ in range(100):
+        assert sched.away_after == 300.0
+    assert db.reads <= 1, f"{db.reads} database reads for one cached number"
+
+
+def test_the_cached_interruption_count_still_tracks_writes(
+    clock: FakeClock,
+) -> None:
+    """A cache that goes stale would freeze the backoff at its first value."""
+    db = FakeDb()
+    sched = scheduler(lambda *a: ScanOutcome(False, "C:\\x", 5), clock, db)
+    assert sched.away_after == 300.0
+
+    for _ in range(INTERRUPTIONS_BEFORE_BACKOFF):
+        sched._attempt()
+    widened = sched.away_after
+    assert widened > 300.0
+    assert db.values[INTERRUPTIONS_KEY] == str(INTERRUPTIONS_BEFORE_BACKOFF)
+
+    # A completion resets it, and the cache must follow that too.
+    sched.run_scan = lambda *a: ScanOutcome(True)  # type: ignore[assignment]
+    sched._attempt()
+    assert sched.away_after == 300.0
+
+
+def test_a_thread_that_will_not_start_does_not_wedge_the_scheduler(
+    monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> None:
+    """Otherwise it never scans again, silently, with nothing in flight."""
+    sched = scheduler(lambda *a: ScanOutcome(True), clock)
+
+    def refuse(self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    sched._start_attempt()
+
+    assert not sched.scanning, "the running claim was never given back"
+    monkeypatch.undo()
+    sched._start_attempt()
+    assert sched._scan_thread is not None
+    sched._scan_thread.join(timeout=5.0)
+
+
 def test_a_long_run_that_was_interrupted_is_not_held_against_the_threshold(
     clock: FakeClock,
 ) -> None:

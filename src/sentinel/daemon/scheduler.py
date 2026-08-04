@@ -184,6 +184,12 @@ class IdleScheduler:
         self._scan_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._running = False
+        #: Cached because ``away_after`` is read on every tick — twice a
+        #: second by default — and it is otherwise a SQLite read each time.
+        #: Forty thousand queries a day to learn a number that changes when
+        #: *we* change it is not what this daemon is for. ``None`` means
+        #: "not read yet"; every write goes through :meth:`_set_interruptions`.
+        self._interruption_cache: int | None = None
 
     # -- lifecycle -----------------------------------------------------
 
@@ -307,10 +313,22 @@ class IdleScheduler:
             self._running = True
 
         self._abort.clear()
-        self._scan_thread = threading.Thread(
+        thread = threading.Thread(
             target=self._attempt, name="sentinel-idle-scan", daemon=True
         )
-        self._scan_thread.start()
+        try:
+            thread.start()
+        except RuntimeError:
+            # Out of threads. The claim above has to be given back by hand:
+            # nothing is going to reach the `finally` that normally releases
+            # it, and a scheduler stuck at running=True never scans again for
+            # the life of the process — silently, since no scan is in flight
+            # to look wrong.
+            with self._lock:
+                self._running = False
+            log.exception("could not start the background scan thread")
+            return
+        self._scan_thread = thread
 
     def _attempt(self) -> None:
         """Run one attempt to completion, interruption, or failure."""
@@ -342,7 +360,7 @@ class IdleScheduler:
         if outcome.completed:
             self._set(LAST_COMPLETED_KEY, str(self._clock()))
             self._set(CURSOR_KEY, "")
-            self._set(INTERRUPTIONS_KEY, "0")
+            self._set_interruptions(0)
             log.info(
                 "background scan finished: %d files in %.0fs",
                 outcome.files_done, elapsed,
@@ -363,7 +381,7 @@ class IdleScheduler:
 
         if elapsed < SHORT_RUN_SECONDS:
             strikes = self._interruptions() + 1
-            self._set(INTERRUPTIONS_KEY, str(strikes))
+            self._set_interruptions(strikes)
             log.debug(
                 "background scan interrupted after %.0fs (%d in a row)",
                 elapsed, strikes,
@@ -371,7 +389,7 @@ class IdleScheduler:
         else:
             # A long run that was interrupted is the design working, not the
             # threshold being wrong, so it does not count against it.
-            self._set(INTERRUPTIONS_KEY, "0")
+            self._set_interruptions(0)
             log.info(
                 "background scan paused after %.0fs at %s",
                 elapsed, outcome.last_path or "the start",
@@ -395,11 +413,17 @@ class IdleScheduler:
     # -- storage -------------------------------------------------------
 
     def _interruptions(self) -> int:
-        raw = self._get(INTERRUPTIONS_KEY)
-        try:
-            return max(0, int(raw)) if raw else 0
-        except ValueError:
-            return 0
+        if self._interruption_cache is None:
+            raw = self._get(INTERRUPTIONS_KEY)
+            try:
+                self._interruption_cache = max(0, int(raw)) if raw else 0
+            except ValueError:
+                self._interruption_cache = 0
+        return self._interruption_cache
+
+    def _set_interruptions(self, value: int) -> None:
+        self._interruption_cache = value
+        self._set(INTERRUPTIONS_KEY, str(value))
 
     def _get_float(self, key: str) -> float | None:
         raw = self._get(key)

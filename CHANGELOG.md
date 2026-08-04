@@ -10,6 +10,45 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Changed — the window, simplified
+
+- **The stylesheet was never reaching the window.** `ui/app.main` sets it on
+  the QApplication, which covers `sentinel gui` and nothing else — so a window
+  built directly, which is what the CI smoke check and any embedding caller
+  do, came up in Qt's default palette. Nothing caught it, because a window
+  renders perfectly well unstyled and "did it build?" was the only question
+  being asked. The window now applies the theme itself when the application
+  has not, and there are tests for the theme rather than only for the build.
+- **Group boxes are gone.** Three bordered boxes on the scan page and five on
+  settings is a stack of rectangles competing for the same attention with a
+  1px line each. Nothing on those pages was ambiguous about which control
+  belonged to which heading — they are laid out one under another — so the
+  border was decoration. Grouping is done with space now, via a small
+  `Section` widget, and borders are kept for the two places they mean
+  something: a field you can type into, and a table of data.
+- **Section titles are small, capitalised and letter-spaced**, set on the
+  QFont rather than in the stylesheet — Qt's QSS subset has neither
+  `text-transform` nor `letter-spacing` and ignores both silently, which is
+  why the first attempt rendered as body text sitting flush against its own
+  contents, reading as the first item in the list rather than the name of it.
+- **The folder picker is hidden until Custom is chosen**, rather than greyed
+  out. A disabled list box and two dead buttons, shown to everybody who picked
+  Quick, was a third of the page spent on a mode they are not in — and a
+  control you can see but cannot use is a question you have to stop and
+  answer.
+- **Progress is hidden until there is any.** Before the first scan that
+  section was a title, the words "Not running", and a large empty rectangle.
+  It stays once a scan has run, because last time's result is what somebody
+  comes back to the page to read.
+- **One accent colour**, spent only on the primary action and the selected
+  page. On a page where one button starts a forty-minute job it needs to be
+  obvious which one that is. The selected-page marker is on every sidebar row
+  and transparent until selected, so switching pages no longer shifts the
+  labels 3px sideways.
+- Numeric settings fields are one fixed width instead of stretching to the
+  window; a 700-pixel box holding "8" promises something long and puts the
+  value miles from its label.
+
 ### Added — background scanning that gets out of the way
 
 The full-disk scan takes tens of minutes on the hardware this is built for,

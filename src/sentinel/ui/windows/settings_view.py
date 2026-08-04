@@ -6,12 +6,11 @@ they are the ones with consequences the user cannot undo.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Slot
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from sentinel.core.config import Config, save_config
 from sentinel.core.logger import get_logger
+from sentinel.ui.widgets import Section
 from sentinel.utils.humanize import human_bytes
 
 log = get_logger(__name__)
@@ -42,8 +42,8 @@ class SettingsView(QWidget):
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
-        outer.setSpacing(12)
+        outer.setContentsMargins(32, 28, 32, 28)
+        outer.setSpacing(20)
 
         heading = QLabel("Settings")
         heading.setObjectName("heading")
@@ -55,7 +55,11 @@ class SettingsView(QWidget):
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 12, 0)   # room for the scrollbar
+        # Matches the scan page. The gap between sections is the only thing
+        # grouping them now, so it has to stay clearly bigger than the gap
+        # between controls inside one.
+        layout.setSpacing(26)
 
         if self._tuning_summary:
             layout.addWidget(self._build_hardware_box())
@@ -81,7 +85,7 @@ class SettingsView(QWidget):
 
     # -- sections ------------------------------------------------------
 
-    def _build_hardware_box(self) -> QGroupBox:
+    def _build_hardware_box(self) -> Section:
         """What Sentinel measured, and what it chose because of it.
 
         Shown first, and worded so somebody who knows nothing about scanners
@@ -90,8 +94,8 @@ class SettingsView(QWidget):
         is what turns an automatic decision into evidence the software looked
         at their machine rather than guessing.
         """
-        box = QGroupBox("Set up for your computer")
-        layout = QVBoxLayout(box)
+        box = Section("Set up for your computer")
+        layout = box.body
 
         summary = QLabel(self._tuning_summary)
         summary.setWordWrap(True)
@@ -106,9 +110,9 @@ class SettingsView(QWidget):
         layout.addWidget(note)
         return box
 
-    def _build_privacy_box(self) -> QGroupBox:
-        box = QGroupBox("Privacy")
-        layout = QVBoxLayout(box)
+    def _build_privacy_box(self) -> Section:
+        box = Section("Privacy")
+        layout = box.body
 
         note = QLabel(
             "By default Sentinel Scan makes no network requests at all. "
@@ -164,17 +168,34 @@ class SettingsView(QWidget):
 
         return box
 
-    def _build_scan_box(self) -> QGroupBox:
-        box = QGroupBox("Scanning")
-        form = QFormLayout(box)
+    def _build_scan_box(self) -> Section:
+        box = Section("Scanning")
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(8)
+        # Fields size to their content, rather than stretching to the window.
+        # A number box 700 pixels wide to hold "8" tells the user to expect
+        # something long, and it puts the value miles from its own label. The
+        # four boxes are then given one fixed width rather than their own
+        # size hints, so the column has an edge instead of four ragged ones.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        # Labels sit above nothing and values right of them; left-aligned so
+        # the column of labels reads as a list rather than as ragged text
+        # pushed against the fields.
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        box.body.addLayout(form)
 
         self.threads = QSpinBox()
+        self.threads.setFixedWidth(130)
         self.threads.setRange(0, 64)
         self.threads.setSpecialValueText("Automatic")
         self.threads.setToolTip("0 picks a thread count based on your CPU.")
         form.addRow("Worker threads", self.threads)
 
         self.max_file_size = QSpinBox()
+        self.max_file_size.setFixedWidth(130)
         self.max_file_size.setRange(1, 8192)
         self.max_file_size.setSuffix(" MB")
         self.max_file_size.setToolTip(
@@ -183,11 +204,13 @@ class SettingsView(QWidget):
         form.addRow("Max file size", self.max_file_size)
 
         self.archive_depth = QSpinBox()
+        self.archive_depth.setFixedWidth(130)
         self.archive_depth.setRange(0, 5)
         self.archive_depth.setToolTip("0 disables looking inside archives.")
         form.addRow("Archive depth", self.archive_depth)
 
         self.threat_threshold = QSpinBox()
+        self.threat_threshold.setFixedWidth(130)
         self.threat_threshold.setRange(1, 100)
         self.threat_threshold.setToolTip(
             "Aggregate score at which a file is reported as a threat. "
@@ -203,9 +226,9 @@ class SettingsView(QWidget):
 
         return box
 
-    def _build_detector_box(self) -> QGroupBox:
-        box = QGroupBox("Detectors")
-        layout = QVBoxLayout(box)
+    def _build_detector_box(self) -> Section:
+        box = Section("Detectors")
+        layout = box.body
 
         self.detector_checks: dict[str, QCheckBox] = {}
         for name, label in (
@@ -229,9 +252,9 @@ class SettingsView(QWidget):
 
         return box
 
-    def _build_signature_box(self) -> QGroupBox:
-        box = QGroupBox("Signatures")
-        layout = QVBoxLayout(box)
+    def _build_signature_box(self) -> Section:
+        box = Section("Signatures")
+        layout = box.body
 
         self.signature_label = QLabel("")
         self.signature_label.setWordWrap(True)

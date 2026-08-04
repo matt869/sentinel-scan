@@ -9,7 +9,6 @@ from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -24,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from sentinel.core.config import Config
 from sentinel.engine.verdict import SEVERITY_COLORS, ScanResult, Severity
+from sentinel.ui.widgets import Section
 from sentinel.utils.humanize import human_bytes, human_count, human_duration, shorten_path
 
 #: How many lines of live activity to keep. Unbounded growth would eat
@@ -47,8 +47,11 @@ class ScanView(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(32, 28, 32, 28)
+        # The gap between sections is what groups them, now that none of them
+        # is drawn inside a box. It has to be clearly larger than the spacing
+        # between controls within a section (8px) or the grouping inverts.
+        layout.setSpacing(26)
 
         heading = QLabel("Scan")
         heading.setObjectName("heading")
@@ -57,13 +60,17 @@ class ScanView(QWidget):
         layout.addWidget(self._build_target_box())
         layout.addWidget(self._build_options_box())
         layout.addLayout(self._build_buttons())
-        layout.addWidget(self._build_progress_box(), stretch=1)
+
+        progress = self._build_progress_box()
+        progress.setVisible(False)
+        layout.addWidget(progress, stretch=1)
+        layout.addStretch()
 
     # -- construction --------------------------------------------------
 
-    def _build_target_box(self) -> QGroupBox:
-        box = QGroupBox("What to scan")
-        layout = QVBoxLayout(box)
+    def _build_target_box(self) -> Section:
+        box = Section("What to scan")
+        layout = box.body
 
         self.radio_quick = QRadioButton(
             "Quick — Downloads, temp folders and autostart locations"
@@ -76,32 +83,38 @@ class ScanView(QWidget):
         layout.addWidget(self.radio_full)
         layout.addWidget(self.radio_custom)
 
-        custom_row = QHBoxLayout()
+        # The folder picker lives inside its own widget so it can be hidden
+        # outright rather than greyed out. A disabled list box and two dead
+        # buttons, shown to everybody who picked Quick, is a third of this
+        # page spent on a mode they are not in — and a control you can see but
+        # cannot use is a question the user has to stop and answer.
+        self.custom_panel = QWidget()
+        custom_row = QHBoxLayout(self.custom_panel)
+        custom_row.setContentsMargins(26, 2, 0, 0)
+
         self.path_list = QListWidget()
         self.path_list.setMaximumHeight(96)
-        self.path_list.setEnabled(False)
         custom_row.addWidget(self.path_list, stretch=1)
 
         button_column = QVBoxLayout()
         self.add_button = QPushButton("Add folder…")
-        self.add_button.setEnabled(False)
         self.add_button.clicked.connect(self._add_path)
         self.remove_button = QPushButton("Remove")
-        self.remove_button.setEnabled(False)
         self.remove_button.clicked.connect(self._remove_path)
         button_column.addWidget(self.add_button)
         button_column.addWidget(self.remove_button)
         button_column.addStretch()
         custom_row.addLayout(button_column)
 
-        layout.addLayout(custom_row)
+        self.custom_panel.setVisible(False)
+        layout.addWidget(self.custom_panel)
 
         self.radio_custom.toggled.connect(self._on_custom_toggled)
         return box
 
-    def _build_options_box(self) -> QGroupBox:
-        box = QGroupBox("Options")
-        layout = QVBoxLayout(box)
+    def _build_options_box(self) -> Section:
+        box = Section("Options")
+        layout = box.body
 
         self.check_quarantine = QCheckBox(
             "Automatically quarantine high-severity findings"
@@ -136,9 +149,17 @@ class ScanView(QWidget):
         row.addStretch()
         return row
 
-    def _build_progress_box(self) -> QGroupBox:
-        box = QGroupBox("Progress")
-        layout = QVBoxLayout(box)
+    def _build_progress_box(self) -> Section:
+        """Progress, hidden until there is any.
+
+        Before the first scan this section is a title, the words "Not
+        running", and a large empty black rectangle — a third of the page
+        given over to saying nothing has happened. The page is about starting
+        a scan until one is running, and about watching it after that.
+        """
+        box = Section("Progress")
+        self.progress_section = box
+        layout = box.body
 
         self.progress = QProgressBar()
         # Starts indeterminate. The scan counts the tree before reading any
@@ -172,9 +193,7 @@ class ScanView(QWidget):
 
     @Slot(bool)
     def _on_custom_toggled(self, checked: bool) -> None:
-        self.path_list.setEnabled(checked)
-        self.add_button.setEnabled(checked)
-        self.remove_button.setEnabled(checked)
+        self.custom_panel.setVisible(checked)
 
     @Slot(bool)
     def _on_archives_toggled(self, checked: bool) -> None:
@@ -226,6 +245,11 @@ class ScanView(QWidget):
         self.start_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
         self.progress.setVisible(running)
+        # Stays visible once a scan has been run: the result of the last one
+        # is the thing somebody comes back to the page to read.
+        self.progress_section.setVisible(
+            running or self.progress_section.isVisible()
+        )
         for widget in (
             self.radio_quick, self.radio_full, self.radio_custom,
             self.check_quarantine, self.check_archives,

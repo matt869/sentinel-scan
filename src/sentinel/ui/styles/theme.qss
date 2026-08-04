@@ -4,6 +4,16 @@
     A dark theme, because this is a tool people run when something is wrong
     and a wall of white is not what you want then.
 
+    The rule the whole sheet follows: a border has to mean something. It
+    means "you can type here" (inputs) or "this is data" (tables), and
+    nothing else. Grouping is done with space, which does the same job
+    without adding a line to look at — see ui/widgets.py.
+
+    One accent colour, #5e9bd6, and it is spent only on the primary action
+    and the selected page. If everything is emphasised then nothing is, and
+    on a page where one control starts a forty-minute job it needs to be
+    obvious which one that is.
+
     Severity colours match SEVERITY_COLORS in engine/verdict.py so the CLI
     and the GUI agree:
         critical  #ff5555
@@ -27,14 +37,29 @@ QDialog {
 /* ---------------------------------------------------------------- text */
 
 QLabel#heading {
-    font-size: 22px;
+    font-size: 21px;
     font-weight: 600;
     color: #eceff4;
-    padding-bottom: 4px;
+}
+
+/*
+    Section titles. Colour only — the size, the weight, the capitals and the
+    tracking are set on the QFont in ui/widgets.py, because Qt's QSS subset
+    has neither `text-transform` nor `letter-spacing` and ignores both without
+    a word. Setting `font-size` here as well would override the QFont and take
+    the tracking with it.
+*/
+QLabel#sectionTitle {
+    color: #7d8797;
 }
 
 QLabel#dim {
     color: #8b93a1;
+}
+
+QLabel#hint {
+    color: #79808d;
+    font-size: 12px;
 }
 
 QLabel#stats {
@@ -58,13 +83,19 @@ QListWidget#sidebar {
 }
 
 QListWidget#sidebar::item {
-    padding: 12px 18px;
+    padding: 11px 20px;
     border: none;
+    border-left: 3px solid transparent;
     color: #98a0af;
 }
 
+/*
+    The accent bar is on every item, transparent until selected. Adding the
+    border only on :selected would shift the label 3px sideways each time the
+    page changes, which reads as the layout twitching.
+*/
 QListWidget#sidebar::item:selected {
-    background-color: #2b303b;
+    background-color: #262b34;
     color: #eceff4;
     border-left: 3px solid #5e9bd6;
 }
@@ -78,16 +109,15 @@ QListWidget#sidebar::item:hover:!selected {
 
 QPushButton {
     background-color: #2b303b;
-    border: 1px solid #3b4252;
-    border-radius: 4px;
-    padding: 7px 16px;
+    border: none;
+    border-radius: 5px;
+    padding: 9px 18px;
     color: #d8dee9;
-    min-width: 88px;
+    min-width: 92px;
 }
 
 QPushButton:hover {
-    background-color: #353b48;
-    border-color: #4c566a;
+    background-color: #363d4b;
 }
 
 QPushButton:pressed {
@@ -95,14 +125,12 @@ QPushButton:pressed {
 }
 
 QPushButton:disabled {
-    background-color: #22262e;
-    color: #5b6270;
-    border-color: #2b303b;
+    background-color: #24282f;
+    color: #565d6b;
 }
 
 QPushButton#primary {
     background-color: #4c7fb8;
-    border-color: #5e9bd6;
     color: #ffffff;
     font-weight: 600;
 }
@@ -117,7 +145,7 @@ QPushButton#primary:disabled {
 }
 
 QPushButton#danger {
-    border-color: #8b3a3a;
+    background-color: #2b303b;
     color: #ff8877;
 }
 
@@ -127,21 +155,23 @@ QPushButton#danger:hover {
 }
 
 /* -------------------------------------------------------------- groups */
-
+/*
+    QGroupBox is no longer used by any page — see ui/widgets.py for why —
+    but a dialog or a plugin may still create one, and an unstyled group box
+    against this background renders as a grey box with black text.
+*/
 QGroupBox {
-    border: 1px solid #2b303b;
-    border-radius: 6px;
-    margin-top: 14px;
-    padding-top: 14px;
+    border: none;
+    margin-top: 12px;
+    padding-top: 12px;
     font-weight: 600;
+    color: #7d8797;
 }
 
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 12px;
-    padding: 0 6px;
-    color: #8fbcbb;
+    padding: 0;
 }
 
 /* -------------------------------------------------------------- tables */
@@ -151,8 +181,8 @@ QListWidget,
 QTreeWidget {
     background-color: #181b20;
     alternate-background-color: #1c2027;
-    border: 1px solid #2b303b;
-    border-radius: 4px;
+    border: 1px solid #272c35;
+    border-radius: 5px;
     gridline-color: #2b303b;
     selection-background-color: #33465c;
     selection-color: #eceff4;
@@ -186,9 +216,9 @@ QTextEdit,
 QSpinBox,
 QComboBox {
     background-color: #14171c;
-    border: 1px solid #3b4252;
-    border-radius: 4px;
-    padding: 6px 8px;
+    border: 1px solid #333a47;
+    border-radius: 5px;
+    padding: 7px 9px;
     color: #d8dee9;
     selection-background-color: #4c7fb8;
 }
@@ -266,16 +296,16 @@ QRadioButton::indicator:disabled {
 /* ------------------------------------------------------------ progress */
 
 QProgressBar {
-    background-color: #14171c;
-    border: 1px solid #2b303b;
+    background-color: #22262e;
+    border: none;
     border-radius: 4px;
-    height: 10px;
+    height: 8px;
     text-align: center;
 }
 
 QProgressBar::chunk {
     background-color: #5e9bd6;
-    border-radius: 3px;
+    border-radius: 4px;
 }
 
 /* --------------------------------------------------------------- tabs */

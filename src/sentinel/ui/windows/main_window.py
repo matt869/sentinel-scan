@@ -66,12 +66,38 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Sentinel Scan {__version__}")
         self.resize(1100, 720)
         self.setMinimumSize(860, 560)
+        self._ensure_theme()
 
         self._build_ui()
         self._build_menu()
         self._connect()
 
     # -- construction --------------------------------------------------
+
+    def _ensure_theme(self) -> None:
+        """Apply the stylesheet if whoever started us has not.
+
+        ``ui/app.main`` sets it on the QApplication, which covers the shipping
+        path. Nothing else does — so a window built directly, which is what
+        the CI smoke check and any embedding caller do, came up in Qt's
+        default palette. The check still passed, because a window renders
+        perfectly well unstyled; it just does not look like this application,
+        which means the theme could break and nothing would notice.
+
+        Set on the window rather than the application so a caller who has
+        already chosen a stylesheet keeps it.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        instance = QApplication.instance()
+        if instance is not None and instance.styleSheet():
+            return
+
+        from sentinel.ui.app import load_stylesheet
+
+        stylesheet = load_stylesheet()
+        if stylesheet:
+            self.setStyleSheet(stylesheet)
 
     def _build_ui(self) -> None:
         central = QWidget()

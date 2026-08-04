@@ -440,16 +440,21 @@ def test_the_loop_survives_a_failing_tick(
 ) -> None:
     """A dead scheduler thread means a product that silently never scans again."""
     calls: list[int] = []
+    ticked_twice = threading.Event()
 
     def boom() -> None:
         calls.append(1)
+        if len(calls) >= 2:
+            ticked_twice.set()
         raise RuntimeError("nope")
 
     sched = scheduler(lambda *a: ScanOutcome(True), clock, poll_seconds=0.01)
     monkeypatch.setattr(sched, "_tick", boom)
 
+    # Waiting on the second tick rather than on a stopwatch. A fixed sleep
+    # asserts something about how fast the CI runner is, which is not what
+    # this test is about and is how a suite acquires a flake.
     with sched:
-        deadline = threading.Event()
-        deadline.wait(0.2)
+        survived = ticked_twice.wait(10.0)
 
-    assert len(calls) > 1, "the loop stopped after the first failure"
+    assert survived, "the loop stopped after the first failure"

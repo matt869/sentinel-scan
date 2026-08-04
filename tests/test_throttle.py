@@ -9,6 +9,7 @@ and cannot be made deterministic on a CI runner anyway.
 from __future__ import annotations
 
 import dataclasses
+import os
 import threading
 
 import pytest
@@ -45,6 +46,30 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+#: Captured before anything patches it, so the one test that exercises the
+#: real thing can still reach it.
+_REAL_SET_BACKGROUND_IO = ThrottleGovernor._set_background_io
+
+
+@pytest.fixture(autouse=True)
+def priority_calls(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Keep these tests out of the test runner's own scheduling priority.
+
+    ``_set_background_io`` really does call ``SetPriorityClass``, and it
+    applies to the whole process — which, here, is pytest. A test that
+    dropped the runner into background I/O mode and never restored it would
+    slow every test that ran after it, and that surfaces as an unrelated
+    timeout hundreds of tests later. Recorded instead.
+    """
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        ThrottleGovernor,
+        "_set_background_io",
+        lambda self, on: calls.append(on),
+    )
+    return calls
 
 
 @pytest.fixture
@@ -319,6 +344,52 @@ def test_duty_cycles_are_ordered_with_the_paces() -> None:
     assert duties == sorted(duties)
     assert _DUTY[Pace.PAUSED] == 0.0
     assert _DUTY[Pace.FULL] == 1.0
+
+
+# ----------------------------------------------------------------------
+# background I/O priority
+# ----------------------------------------------------------------------
+
+def test_background_io_follows_the_pace_not_the_scan(
+    priority_calls: list[bool], clock: FakeClock
+) -> None:
+    """Yielding I/O while nobody is there just makes the scan longer."""
+    sensors = FakeSensors(Reading(system_cpu=1.0, own_cpu=0.0, idle_seconds=9999))
+    gov = governor(sensors, clock, recovery_seconds=0.0)
+    gov.budget(force=True)
+
+    sensors.reading = Reading(system_cpu=95.0, own_cpu=1.0, idle_seconds=0)
+    gov.budget(force=True)
+    assert priority_calls[-1] is True, "throttled, so our reads should queue behind"
+
+    sensors.reading = Reading(system_cpu=1.0, own_cpu=0.0, idle_seconds=9999)
+    # Two samples, even at zero recovery: the first observes the calm and
+    # starts the clock on it, the second finds it has held. A single quiet
+    # reading is never enough to climb.
+    gov.budget(force=True)
+    clock.advance(60.0)
+    gov.budget(force=True)
+    assert priority_calls[-1] is False, "nobody to yield to, so take the disk"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process background mode")
+def test_the_real_background_mode_can_be_entered_and_left() -> None:
+    """The ctypes call itself, on the only platform that has it.
+
+    Restored in a finally: leaving the test runner in background mode would
+    slow everything after it.
+    """
+    gov = ThrottleGovernor(sensors=FakeSensors(), clock=FakeClock())
+    try:
+        _REAL_SET_BACKGROUND_IO(gov, True)
+        assert gov._background_io is True
+        # Asking twice must be a no-op, not an error: Windows returns
+        # ERROR_PROCESS_MODE_ALREADY_BACKGROUND for the second call.
+        _REAL_SET_BACKGROUND_IO(gov, True)
+        assert gov._background_io is True
+    finally:
+        _REAL_SET_BACKGROUND_IO(gov, False)
+    assert gov._background_io is False
 
 
 def test_budget_is_immutable() -> None:

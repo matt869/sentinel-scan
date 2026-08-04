@@ -15,7 +15,7 @@
 #endif
 
 #define MyAppName "Sentinel Scan"
-#define MyAppPublisher "The Sentinel Scan contributors"
+#define MyAppPublisher "matt869"
 #define MyAppURL "https://github.com/sentinel-scan/sentinel-scan"
 #define MyAppExeName "sentinel-gui.exe"
 #define MyAppCliName "sentinel.exe"

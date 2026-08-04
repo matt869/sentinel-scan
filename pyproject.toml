@@ -9,7 +9,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dynamic = ["version"]
-authors = [{ name = "The Sentinel Scan contributors" }]
+authors = [{ name = "matt869" }]
 keywords = ["antivirus", "malware", "scanner", "yara", "clamav", "security"]
 classifiers = [
     "Development Status :: 4 - Beta",

@@ -77,9 +77,14 @@ Triggered by a `v*` tag. The version in the tag is checked against
 `src/sentinel/version.py` before anything is built, so a signed artifact can
 always be traced to one commit.
 
-**Maintainers with release rights** — *fill this in; SignPath asks who is
-authorised to trigger a signed build, and the answer has to match the GitHub
-permissions.*
+**Maintainers with release rights** — matt869, sole maintainer. Nobody else
+can push a tag, so nobody else can trigger a signed build.
+
+The publisher name in
+[installer.iss](../packaging/windows/installer.iss) and the `authors` field in
+`pyproject.toml` both say `matt869`. Keep them matching whatever subject name
+ends up on the certificate — an installer whose declared publisher disagrees
+with its signature is a mismatch users are told to treat as tampering.
 
 ### Two things worth pre-empting
 

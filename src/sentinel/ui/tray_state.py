@@ -42,6 +42,7 @@ people to ignore red.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
@@ -269,3 +270,55 @@ def describe_age(seconds: float) -> str:
 
     months = round(days / 30)
     return f"{human_count(months, 'month')} ago"
+
+
+# ----------------------------------------------------------------------
+# how often the tray is allowed to speak
+# ----------------------------------------------------------------------
+
+#: Toasts allowed per rolling hour before they coalesce into one.
+MAX_TOASTS_PER_HOUR = 3
+
+
+class NotificationBudget:
+    """Rate limits toasts over a rolling window.
+
+    Here rather than in ``ui/tray.py`` for the same reason the rest of this
+    module is: the limit is a rule, not a side effect of some Qt behaviour,
+    and a rule should be testable without a desktop session.
+
+    It used to say that while living in the module that imports PySide6, so
+    it was not true — and importing it to test it dragged in Qt, which on a
+    machine without the GUI extra installed is an ImportError at collection
+    time. That took the whole test run down, including the tests in this
+    module that have nothing to do with a tray icon at all.
+    """
+
+    def __init__(self, limit: int = MAX_TOASTS_PER_HOUR, window: float = 3600.0) -> None:
+        self.limit = limit
+        self.window = window
+        self._sent: deque[float] = deque()
+        self._suppressed = 0
+
+    def allow(self, now: float | None = None) -> bool:
+        """Whether a toast may be shown, recording it if so."""
+        moment = time.time() if now is None else now
+        while self._sent and moment - self._sent[0] > self.window:
+            self._sent.popleft()
+
+        if len(self._sent) >= self.limit:
+            self._suppressed += 1
+            return False
+
+        self._sent.append(moment)
+        return True
+
+    @property
+    def suppressed(self) -> int:
+        """How many toasts have been withheld since the last summary."""
+        return self._suppressed
+
+    def take_suppressed(self) -> int:
+        count = self._suppressed
+        self._suppressed = 0
+        return count

@@ -14,7 +14,8 @@ Toast      OS notification            Something was moved somewhere safe
 Modal      Steals focus               Could not move a file; protection off
 =========  =========================  =======================================
 
-At most :data:`MAX_TOASTS_PER_HOUR` toasts, then they coalesce. Ten threats
+At most :data:`~sentinel.ui.tray_state.MAX_TOASTS_PER_HOUR` toasts, then
+they coalesce. Ten threats
 in one scan produce one notification, not ten. And nothing is announced for a
 scan that found nothing — silence is the feature. An application that is
 quiet for weeks is one you believe when it finally speaks.
@@ -22,8 +23,6 @@ quiet for weeks is one you believe when it finally speaks.
 
 from __future__ import annotations
 
-import time
-from collections import deque
 from typing import Any
 
 from PySide6.QtCore import QObject, QPoint, Signal, SignalInstance
@@ -31,53 +30,16 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from sentinel.core.logger import get_logger
 from sentinel.ui.icons import all_icons
-from sentinel.ui.tray_state import TrayState, TrayStatus
+from sentinel.ui.tray_state import (
+    NotificationBudget,
+    TrayState,
+    TrayStatus,
+)
 from sentinel.ui.windows.flyout import Flyout
 
 log = get_logger(__name__)
 
-#: Toasts allowed per rolling hour before they coalesce into one.
-MAX_TOASTS_PER_HOUR = 3
-
 TOAST_TIMEOUT_MS = 6000
-
-
-class NotificationBudget:
-    """Rate limits toasts over a rolling window.
-
-    Separate from the tray so the policy can be tested without a desktop
-    session, and so it is obvious that the limit is a rule rather than a
-    side effect of some Qt behaviour.
-    """
-
-    def __init__(self, limit: int = MAX_TOASTS_PER_HOUR, window: float = 3600.0) -> None:
-        self.limit = limit
-        self.window = window
-        self._sent: deque[float] = deque()
-        self._suppressed = 0
-
-    def allow(self, now: float | None = None) -> bool:
-        """Whether a toast may be shown, recording it if so."""
-        moment = time.time() if now is None else now
-        while self._sent and moment - self._sent[0] > self.window:
-            self._sent.popleft()
-
-        if len(self._sent) >= self.limit:
-            self._suppressed += 1
-            return False
-
-        self._sent.append(moment)
-        return True
-
-    @property
-    def suppressed(self) -> int:
-        """How many toasts have been withheld since the last summary."""
-        return self._suppressed
-
-    def take_suppressed(self) -> int:
-        count = self._suppressed
-        self._suppressed = 0
-        return count
 
 
 class SentinelTray(QObject):

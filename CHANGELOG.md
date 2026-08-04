@@ -10,6 +10,27 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Fixed — the test suite could not run without the GUI extra installed
+
+`tests/test_tray.py` imported `NotificationBudget` from `ui/tray.py`, which
+imports PySide6 at module level. CI's test matrix installs
+`.[yara,pe,system]` — no GUI extra — so that import was a *collection* error,
+and pytest exits before running a single test when collection fails. One
+misplaced import turned the whole suite red on all six OS/Python
+combinations at once, in seventeen seconds, with nothing in the log about any
+code that had actually broken.
+
+`NotificationBudget` needs no Qt. Its own docstring said so — "separate from
+the tray so the policy can be tested without a desktop session" — while
+sitting in the module that pulls in PySide6, so the claim was not true. It
+now lives in `ui/tray_state.py`, which holds no Qt by design, alongside the
+rest of the tray's decisions. `ui/tray.py` still re-exports it.
+
+There is a test for the class of bug now, not just this instance:
+`TestNoQtRequired` imports every module that must work without a desktop in a
+subprocess with PySide6 blocked at the import hook. A subprocess because the
+check is worthless once Qt is already in `sys.modules`.
+
 ### Changed — the window, simplified
 
 - **The stylesheet was never reaching the window.** `ui/app.main` sets it on

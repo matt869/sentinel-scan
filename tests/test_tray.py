@@ -16,8 +16,12 @@ from typing import Any, ClassVar
 import pytest
 
 from sentinel.system.resources import ResourceMeter
-from sentinel.ui.tray import NotificationBudget
-from sentinel.ui.tray_state import TrayState, TrayStatus, describe_age
+from sentinel.ui.tray_state import (
+    NotificationBudget,
+    TrayState,
+    TrayStatus,
+    describe_age,
+)
 
 # ----------------------------------------------------------------------
 # which icon
@@ -418,3 +422,74 @@ class TestLazyWindow:
             assert app.has_window
         finally:
             app.db.close()
+
+
+# ----------------------------------------------------------------------
+# importable without a desktop
+# ----------------------------------------------------------------------
+
+class TestNoQtRequired:
+    """Nothing in this file may need PySide6 to be installed.
+
+    This is not hygiene, it is the whole test run. CI's test matrix installs
+    ``.[yara,pe,system]`` — no GUI extra — and a module-level import of
+    PySide6 anywhere under ``tests/`` is a *collection* error. Pytest then
+    exits before running a single test, so one misplaced import turns the
+    entire suite red on every OS and every Python version at once, with
+    nothing in the log about the code that actually broke.
+
+    That is exactly what happened: ``NotificationBudget`` is pure policy and
+    said so in its own docstring, but it lived in ``ui/tray.py`` next to the
+    QObject subclasses, so importing it to test it dragged Qt in.
+    """
+
+    #: Modules a machine with no GUI extra must still be able to import.
+    QT_FREE = (
+        "sentinel.ui.tray_state",
+        "sentinel.system.resources",
+        "sentinel.cli.commands",
+        "sentinel.engine.scanner",
+        "sentinel.daemon.throttle",
+        "sentinel.daemon.scheduler",
+        "sentinel.system.idle",
+    )
+
+    def test_they_import_with_pyside6_unavailable(self) -> None:
+        """Run in a subprocess with PySide6 blocked at the import hook.
+
+        A subprocess because this process has already imported Qt — the
+        check is worthless if the module is sitting in ``sys.modules``.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            f"""
+            import sys
+
+            class Blocker:
+                def find_spec(self, name, path=None, target=None):
+                    if name == "PySide6" or name.startswith("PySide6."):
+                        raise ModuleNotFoundError(
+                            "No module named " + repr(name), name=name
+                        )
+                    return None
+
+            sys.meta_path.insert(0, Blocker())
+
+            import importlib
+            for module in {self.QT_FREE!r}:
+                importlib.import_module(module)
+            print("OK")
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        assert completed.returncode == 0, (
+            "a module that must work without the GUI extra imports PySide6:\n"
+            + completed.stderr
+        )
+        assert "OK" in completed.stdout

@@ -10,6 +10,47 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Added — a soak harness for the daemon, and the numbers it produced
+
+`scripts/soak_daemon.py`. The daemon runs for weeks without a restart, which
+makes it the part of this application where a small leak becomes a real one —
+and a test that finishes in five seconds cannot see a slope.
+
+Time is compressed rather than waited out. A leak is per *tick*, not per
+second — the scheduler leaks or does not leak once per poll, whatever the
+interval — so the loops are driven far faster than production and the ticks
+are counted, then reported as real hours at the real 2-second poll. Four
+minutes of wall clock covers more than eight hours of operation.
+
+Measured on Windows, 16 cores:
+
+- **Idle** (what it does almost always: tick, decide not to scan, sample,
+  decide nothing changed) — 15,654 scheduler ticks, equal to **8.7 hours** at
+  the real poll. RSS 28.79 → 28.96 MB, and flat at 29.01 MB across the last
+  12,000 consecutive ticks. Steady-state growth **0.000 MB per 8 idle hours**.
+  Threads back to 1.
+- **Churn** (150 governor lifecycles with 4 workers each, plus 150 scan
+  attempts on fresh threads) — threads 1 → 1, SQLite connections 0 → 0,
+  RSS +2.7 MB and decelerating.
+
+Growth is reported from the *second half* of the run only. The first half
+includes allocator warm-up, which is not a leak and would otherwise be
+reported as one — measuring endpoints alone cannot tell the two apart, and
+over 500 scan cycles the rate fell from 11.8 to 2.4 MB per thousand.
+
+One suspicion this settled: `Database.close()` closes only the calling
+thread's connection, and the scheduler runs every attempt on a new thread, so
+it looked like a connection leak. It is not — 150 attempts left the count
+unchanged. Worth having checked rather than assumed.
+
+Also re-measured after the window redesign, since the memory budget has a
+number on it: **70.9 MB with the window open and all four pages built**,
+against a 90 MB budget.
+
+Separately, the thread-timing tests were run 25 times on Windows and 20 times
+on Linux with all 16 cores saturated, to make sure they do not become the
+flaky ones. No failures in either.
+
 ### Fixed — false positives on the operating system's own scripts
 
 `/usr/bin/apt-key` was reported as suspicious on every Linux machine. It is a

@@ -10,6 +10,50 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Fixed — false positives on the operating system's own scripts
+
+`/usr/bin/apt-key` was reported as suspicious on every Linux machine. It is a
+shell script that base64-decodes a blob and evaluates a variable as a command;
+both are real heuristics, both fire, and together they score 34 — over the
+threshold. It is also Debian's own tool, and the benign-corpus gate scans
+`/usr/bin`, so one file turned every Linux CI job red.
+
+The suppression that should have caught it already existed. `Scanner.
+_vendor_signature_clears` drops non-conclusive findings on binaries the OS
+vendor signed, precisely because structural heuristics are near-worthless
+applied to the operating system's own components. But `os_vendor_signer`
+answered only for Windows and macOS — **on Linux it returned "" for
+everything**, so the whole mechanism was absent on one of the three supported
+platforms.
+
+Linux has no Authenticode. Distribution binaries are not signed in the file;
+they are vouched for by the package manager that installed them, so the
+equivalent question is whether a package owns the path — `dpkg-query -S` or
+`rpm -qf`, about 50ms, and reached only when something was already going to be
+reported.
+
+That is a weaker guarantee than a signature and the difference is handled
+rather than ignored: Authenticode signs the *bytes*, while dpkg and rpm record
+the *path*, so an attacker who overwrote `/usr/bin/apt-key` would leave dpkg
+still claiming it. Package ownership alone would launder that. The file must
+therefore also sit under a system prefix, be owned by root, and be writable by
+nobody else — so putting bytes there requires root, and an attacker who
+already has root is not being held back by a heuristic on a shell script.
+`/usr/local` and `/opt` are deliberately excluded; that is where software the
+distribution did not ship lives, and it is exactly the space heuristics should
+still be looking at.
+
+macOS had the same hole for the same reason. `codesign` answers for Mach-O
+binaries and frameworks but not for the scripts beside them in `/usr/bin`,
+which are not individually signed — they are covered by System Integrity
+Protection instead. The fallback prefers the `SF_RESTRICTED` flag, which while
+SIP is on cannot be cleared even by root, and drops back to the same
+root-owned-under-a-system-prefix test as Linux where the flag is unavailable.
+
+Conclusive detections are still never suppressed, on any platform. Certificates
+get stolen and packages get compromised; an exact digest match against a known
+sample is knowledge rather than a guess, and it outranks both.
+
 ### Fixed — the test suite could not run without the GUI extra installed
 
 `tests/test_tray.py` imported `NotificationBudget` from `ui/tray.py`, which

@@ -53,6 +53,8 @@ def os_vendor_signer(path: str | os.PathLike[str]) -> str:
             return _windows_vendor_signer(Path(path))
         if _is_macos():
             return _macos_vendor_signer(Path(path))
+        if _is_linux():
+            return _linux_vendor_signer(Path(path))
     except Exception as exc:
         log.debug("signature check failed for %s: %s", path, exc)
     return ""
@@ -62,6 +64,12 @@ def _is_macos() -> bool:
     import sys
 
     return sys.platform == "darwin"
+
+
+def _is_linux() -> bool:
+    import sys
+
+    return sys.platform.startswith("linux")
 
 
 # ----------------------------------------------------------------------
@@ -320,4 +328,159 @@ def _macos_vendor_signer(path: Path) -> str:
             authority = line.split("=", 1)[1].strip()
             if any(m in authority.casefold() for m in _MACOS_VENDOR_MARKERS):
                 return authority
+
+    return _macos_system_integrity(path)
+
+
+#: Paths macOS reserves for itself. ``/usr/local`` is deliberately absent:
+#: that is where Homebrew and hand-installed software live, and it is exactly
+#: the space we still want heuristics looking at.
+_MACOS_SYSTEM_PREFIXES: tuple[str, ...] = (
+    "/System/", "/usr/bin/", "/usr/sbin/", "/usr/lib/", "/usr/libexec/",
+    "/bin/", "/sbin/",
+)
+
+#: ``SF_RESTRICTED``. Set by the installer on everything System Integrity
+#: Protection covers, and not clearable while SIP is on — not even by root.
+_SF_RESTRICTED = 0x00080000
+
+
+def _macos_system_integrity(path: Path) -> str:
+    """Fall back to asking whether macOS itself owns this file.
+
+    ``codesign`` answers for Mach-O binaries and frameworks. It does not
+    answer for the shell and Perl scripts that also live in ``/usr/bin`` —
+    those are not individually signed, they are protected by System
+    Integrity Protection instead. Without this fallback every one of them
+    looks unsigned, so the heuristics that fire on any script that decodes
+    base64 or evaluates a variable fire on Apple's own tooling.
+
+    ``SF_RESTRICTED`` is the stronger signal and the one to prefer: while
+    SIP is on, a file carrying it cannot be modified by root. Where the flag
+    is unavailable — SIP disabled, or a filesystem that does not carry BSD
+    flags, which is the case on some CI images — the fallback is the same
+    test the Linux path makes: under a system prefix, owned by root, and not
+    writable by anyone else.
+    """
+    resolved = path.resolve()
+    if not str(resolved).startswith(_MACOS_SYSTEM_PREFIXES):
+        return ""
+
+    try:
+        info = resolved.stat()
+    except OSError:
+        return ""
+
+    if getattr(info, "st_flags", 0) & _SF_RESTRICTED:
+        return "macOS System Integrity Protection"
+
+    if info.st_uid == 0 and not info.st_mode & 0o022:
+        return "the macOS system directories"
     return ""
+
+
+# ----------------------------------------------------------------------
+# Linux
+# ----------------------------------------------------------------------
+#
+# Linux has no Authenticode. Distribution binaries are not signed in the
+# file; they are vouched for by the package manager that installed them. So
+# the equivalent question — "did the operating system vendor put this here?"
+# — is answered by asking whether a package owns the path.
+#
+# That is a genuinely weaker guarantee than a signature and the difference
+# matters. Authenticode signs the *bytes*; dpkg and rpm record the *path*.
+# An attacker who overwrites /usr/bin/apt-key leaves dpkg still claiming the
+# file, so package ownership alone would launder whatever they put there.
+#
+# Which is why ownership alone is not enough here. The file must also live
+# under a system prefix, be owned by root, and not be writable by anyone
+# else — so rewriting it requires root, and an attacker who already has root
+# is not being held back by a heuristic on a shell script.
+
+#: Where distribution-managed executables live. Deliberately excludes /opt
+#: and /usr/local, which are for software the distribution did not ship.
+_LINUX_SYSTEM_PREFIXES: tuple[str, ...] = (
+    "/bin/", "/sbin/", "/lib/", "/lib64/",
+    "/usr/bin/", "/usr/sbin/", "/usr/lib/", "/usr/lib64/", "/usr/libexec/",
+    "/usr/share/",
+)
+
+#: Resolved once. Probing the filesystem for a package manager on every
+#: reported finding would be a syscall per file for an answer that cannot
+#: change while the process is running.
+_package_query: list[str] | None = None
+
+
+def _linux_package_query() -> list[str]:
+    """The argv prefix that maps a path to its owning package, or []."""
+    global _package_query
+    if _package_query is None:
+        for candidate in (
+            ["/usr/bin/dpkg-query", "-S"],
+            ["/usr/bin/dpkg", "-S"],
+            ["/usr/bin/rpm", "-qf"],
+            ["/bin/rpm", "-qf"],
+        ):
+            if os.path.exists(candidate[0]):
+                _package_query = candidate
+                break
+        else:
+            _package_query = []
+    return _package_query
+
+
+def _linux_vendor_signer(path: Path) -> str:
+    """Return the owning distribution package, or ``""``.
+
+    Never raises.
+    """
+    resolved = path.resolve()
+    text = str(resolved)
+    if not text.startswith(_LINUX_SYSTEM_PREFIXES):
+        return ""
+
+    try:
+        info = resolved.stat()
+    except OSError:
+        return ""
+
+    # Root-owned and not writable by group or other. See the note above:
+    # this is what turns "a package claims this path" into "only root could
+    # have put these bytes here".
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        return ""
+
+    query = _linux_package_query()
+    if not query:
+        return ""
+
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            [*query, text],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("package lookup unavailable for %s: %s", path, exc)
+        return ""
+
+    if completed.returncode != 0:
+        return ""
+
+    answer = completed.stdout.strip()
+    if not answer:
+        return ""
+
+    # dpkg answers "apt: /usr/bin/apt-key"; rpm answers "apt-2.4.11-1".
+    package = answer.splitlines()[0]
+    if ":" in package:
+        package = package.split(":", 1)[0]
+    package = package.strip()
+
+    # "diversion by ..." is dpkg telling us the path was redirected rather
+    # than naming an owner.
+    if not package or package.startswith("diversion"):
+        return ""
+    return f"the {package} package"

@@ -16,13 +16,25 @@ governor paces whatever is running.
 
 from __future__ import annotations
 
-from sentinel.daemon.scheduler import IdleScheduler, ScanCursor
-from sentinel.daemon.throttle import Budget, Pace, ThrottleGovernor
+from sentinel.daemon.scheduler import (
+    IdleScheduler,
+    RunScan,
+    ScanCursor,
+    ScanOutcome,
+)
+from sentinel.daemon.throttle import Budget, Pace, Reading, ThrottleGovernor
 
+#: ``ScanOutcome`` and ``RunScan`` are here because a caller cannot use the
+#: scheduler without them — the callback it takes has to return one and is
+#: typed by the other. Leaving them in the submodule made the one import
+#: every integrator needs the one import that does not work.
 __all__ = [
     "Budget",
     "IdleScheduler",
     "Pace",
+    "Reading",
+    "RunScan",
     "ScanCursor",
+    "ScanOutcome",
     "ThrottleGovernor",
 ]

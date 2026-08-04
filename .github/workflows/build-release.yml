@@ -101,9 +101,40 @@ jobs:
           .\dist\sentinel\sentinel.exe --version
           .\dist\sentinel\sentinel.exe detectors
 
-      - name: Sign
-        # Skipped on forks and PRs, where the secret is unavailable.
-        if: ${{ env.CERT_PFX != '' }}
+      # --- signing ------------------------------------------------------
+      # Two routes, and SignPath wins when it is configured. Everything
+      # SignPath needs is absent until the OSS application is approved, so
+      # every step below is inert on a fork, on a PR, and on this repository
+      # today. See docs/signing.md.
+
+      - name: Upload the unsigned bundle for signing
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@v4
+        id: unsigned-bundle
+        with:
+          name: unsigned-bundle
+          path: dist/sentinel/
+
+      - name: Sign the bundle (SignPath)
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: bundle
+          github-artifact-id: ${{ steps.unsigned-bundle.outputs.artifact-id }}
+          wait-for-completion: true
+          # Straight back over the top of the inputs Inno Setup is about to
+          # read. The installer embeds these files byte for byte, so they
+          # have to be signed before it is built, not after.
+          output-artifact-directory: dist/sentinel/
+
+      - name: Sign the bundle (PFX)
+        # The local/fork route. Skipped when SignPath handled it, and when
+        # the secret is unavailable.
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID == '' && env.CERT_PFX != '' }}
         env:
           CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -122,8 +153,29 @@ jobs:
             /DMyAppVersion=${{ needs.version.outputs.version }} `
             packaging\windows\installer.iss
 
-      - name: Sign the installer
-        if: ${{ env.CERT_PFX != '' }}
+      - name: Upload the unsigned installer for signing
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@v4
+        id: unsigned-installer
+        with:
+          name: unsigned-installer
+          path: packaging/windows/Output/*.exe
+
+      - name: Sign the installer (SignPath)
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: packaging/windows/Output/
+
+      - name: Sign the installer (PFX)
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID == '' && env.CERT_PFX != '' }}
         env:
           CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -136,6 +188,10 @@ jobs:
             -PfxPath "$env:RUNNER_TEMP\cert.pfx" -PfxPassword $password
           Remove-Item "$env:RUNNER_TEMP\cert.pfx" -Force
 
+      # Checksums are computed after signing, never before: signing rewrites
+      # the file, so a hash taken earlier describes a binary nobody will ever
+      # download. Publishing that hash is worse than publishing none — it
+      # tells a careful user their download was tampered with.
       - name: Compute checksums
         shell: pwsh
         run: |

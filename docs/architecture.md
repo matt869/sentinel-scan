@@ -15,7 +15,9 @@ signatures   locating and updating signature data
   ↑
 engine       detectors, traversal, scheduling, scoring, quarantine
   ↑
-system       OS inspection (processes, autoruns, drives, hosts file)
+system       OS inspection (processes, autoruns, drives, hosts file, idle)
+  ↑
+daemon       when background work runs, and how hard
   ↑
 feedback     optional reporting to a server
   ↑
@@ -163,6 +165,128 @@ have already identified exactly.
   WAL enabled and writes serialised by a lock.
 - The event bus copies its handler list under a lock and invokes handlers
   outside it, so a handler may subscribe or unsubscribe without deadlocking.
+
+## Background operation
+
+Two questions, deliberately in two modules under `daemon/`, because they have
+different answers, different periods and different failure modes.
+`daemon/throttle.py` answers *how hard may we work right now* and is sampled
+continuously. `daemon/scheduler.py` answers *should a scan be running at all*
+and is consulted every couple of seconds. Neither imports the other: the
+scheduler starts things, the governor paces whatever is running.
+
+### The throttle governor
+
+The promise is that Sentinel stays out of the way, and on a spinning disk
+that is not kept by being efficient. A scan that reads every file will
+saturate that disk however tight the code is. It is kept by not running at
+full speed while somebody is at the machine.
+
+The governor maps a `Reading` of the world onto a `Budget` — a pace, a duty
+cycle, and a reason in plain English that the flyout displays, so "why is my
+computer slow" is never an unanswered question. `decide()` is pure, which is
+why the interesting cases are all testable.
+
+Three properties are load-bearing:
+
+1. **Sleeping between files is not enough on its own.** A sleep gives the
+   disk back only in the gaps; while one of our reads is queued it competes
+   with the user's on equal terms, and the read that makes them wait is the
+   one already in flight. On Windows the governor also enters
+   `PROCESS_MODE_BACKGROUND_BEGIN`, which puts our I/O behind theirs in the
+   scheduler. Neither replaces the other — priority alone still lets us take
+   the whole disk when nobody else wants it, which is exactly when a duty
+   cycle is what saves the user's afternoon. It tracks the pace rather than
+   the scan, because while nobody is there, there is nobody to yield to.
+2. **Our own CPU is subtracted before calling the machine busy.** The naive
+   version reads system-wide CPU at 60%, backs off — except 55 of those
+   points are us — then sees a calm machine, speeds up, and flaps. That is
+   not noise to be smoothed; it is a feedback loop caused by measuring our
+   own output as someone else's input. `Reading.foreign_cpu` is the only
+   number the busy check may use.
+3. **Backing off is immediate, recovering is slow.** The costs are not
+   symmetric. A slow back-off is felt directly, as a computer that stutters
+   when you sit down at it; a slow recovery costs throughput at a moment when
+   nobody is watching. Anything that recovers as fast as it backs off flaps
+   across the threshold and stutters every few seconds. The one exception is
+   a pace the *user* chose: clicking Resume bypasses the hysteresis, because
+   a button that takes thirty seconds to do anything reads as broken.
+
+The pause between files is derived from how long that file took, not fixed:
+one duty cycle then covers both a 2 KB config and a 400 MB installer. It is
+capped at `MAX_PAUSE_SECONDS`, so the duty cycle is a target rather than a
+guarantee — a forty-second file at 15% would otherwise earn a
+226-second pause, and a scan that looks hung is a scan the user kills.
+
+`Pace` defines an explicit `_RANK` rather than comparing values. It subclasses
+`str`, so default ordering is lexicographic, under which `"half" < "full"` is
+`False` and the hysteresis silently inverts for exactly one of the four
+values. The same trap as `Severity`, and the reason that class defines all
+four comparison operators.
+
+### The idle scheduler
+
+The scan being scheduled is the full-disk one — tens of minutes, sometimes
+ninety on a spinning disk. It has to happen, because a scanner that runs only
+when the user remembers to click it runs twice.
+
+- **Not a fixed hour.** A 3 a.m. nightly scan runs on machines that are awake
+  at 3 a.m., which describes servers, not the desktop switched off at the wall
+  or the laptop shut in a bag. The trigger is idleness; the clock only
+  enforces a minimum gap, and that gap is 20 hours rather than 24 so the
+  window re-anchors to when the machine is actually free instead of drifting
+  later every day until it starts skipping.
+- **Interrupted is the normal case.** A machine used daily may never offer
+  ninety unbroken minutes. If an interrupted scan restarted from zero, the
+  first fifth of the disk would be scanned forever and the rest never looked
+  at. `ScanCursor` is checkpointed to the database — it has to survive a
+  reboot to be worth anything — and the next attempt resumes. A cursor is
+  discarded if it is for different roots or older than a week, since resuming
+  into a tree that has been reorganised skips whatever moved above the mark.
+- **Only completions count as scans.** The interval is measured from the last
+  *completed* run. Counting attempts would let a machine that is never idle
+  for long report itself scanned without ever having been.
+- **Backing off when the user keeps returning.** Somebody who steps away for
+  six minutes at a time gets interrupted by a starting scan over and over
+  under a fixed five-minute threshold. After three consecutive short runs the
+  required idle time widens. Long runs that were interrupted do not count —
+  that is the design working, not the threshold being wrong.
+
+The attempt runs on its own thread. Calling it inline from the tick would
+block the very loop whose reaction time is the point of polling every two
+seconds, and the scan would then run to completion under a user who had sat
+back down.
+
+### Detecting idleness
+
+`system/idle.py`, no policy attached. Idle means **time since the last
+keyboard or mouse input**, not low CPU: a machine compiling overnight with
+nobody in the room is busy but idle, and one at 2% with somebody reading on it
+is quiet but in use. We are trying not to be noticed by a person.
+
+`GetLastInputInfo` on Windows, `XScreenSaverQueryInfo` under X11, `ioreg`'s
+`HIDIdleTime` on macOS. Two traps:
+
+- **The Windows tick counter wraps.** `dwTime` is a `DWORD` in `GetTickCount`
+  space, which rolls over every 49.7 days of uptime. Subtracting in Python's
+  unbounded integers gives a negative idle time for the 49.7 days after each
+  wrap, which reads as "the user is here" — so a machine with long uptime
+  silently never scans again. The difference is masked back to 32 bits.
+- **Wayland does not expose this at all**, and its X11 compatibility layer
+  answers 0 forever rather than failing. A frozen 0 is the dangerous shape
+  because it reads as *present* only by accident, so Wayland is detected
+  before the library is loaded.
+
+Every probe returns `None` rather than guessing, and `None` means *the user is
+present*. Being wrong that way costs a scan that does not start; being wrong
+the other way starts a full-disk scan under somebody who is working, which is
+the single behaviour that gets security software uninstalled.
+
+`IdleTracker` turns the raw number into edges. A poll loop comparing raw
+seconds cannot tell "idle for 4 seconds because they paused to think" from
+"idle time just reset because they touched the mouse" — so a *fall* in idle
+time is the positive evidence of input, and everything else is inference from
+a threshold.
 
 ## Scoring
 

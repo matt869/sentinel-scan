@@ -10,6 +10,70 @@ small, and are called out under their own heading.
 
 ## [Unreleased]
 
+### Added — background scanning that gets out of the way
+
+The full-disk scan takes tens of minutes on the hardware this is built for,
+and sometimes ninety on a spinning disk. It has to happen, because a scanner
+that runs only when the user remembers to click it runs twice. It must also
+never be the reason somebody's computer is slow. New `daemon/` package,
+holding those two problems separately.
+
+- **A throttle governor decides how hard the scan may work**, sampling what
+  the machine is doing and pacing the workers between files. The pause is
+  derived from how long each file took, so one duty cycle is right for a 2 KB
+  config and a 400 MB installer alike. Every decision carries a reason in
+  plain English, shown in the flyout, so *why is my computer slow* is never
+  an unanswered question.
+- **On Windows the process also drops into background I/O priority** while
+  throttled. Sleeping between files gives the disk back only in the gaps —
+  while one of our reads is queued it competes with the user's on equal
+  terms, and the read that makes them wait is the one already in flight.
+  Priority is what fixes that; the duty cycle is what stops us taking the
+  whole disk when nobody is there. Neither replaces the other.
+- **The governor subtracts its own CPU use before deciding the machine is
+  busy.** Without that it reads 60% system-wide, backs off, discovers the 55
+  points that were its own have gone, speeds up, and oscillates — a feedback
+  loop from measuring our own output as somebody else's input, not noise to
+  be smoothed away.
+- **Backing off is immediate; recovering waits for sustained calm.** The
+  costs are not symmetric: a slow back-off is felt as a computer that
+  stutters when you sit down at it, a slow recovery costs only throughput
+  while nobody is watching. A pace the user chose themselves bypasses the
+  delay, because a Resume button that takes thirty seconds reads as broken.
+- **An idle scheduler runs the scan when nobody is at the machine**, and
+  checkpoints it so an interrupted one resumes rather than restarting. On a
+  machine used every day, restarting from zero means the first fifth of the
+  disk is scanned forever and the rest never looked at. Only completed runs
+  reset the interval, so a machine that is never idle for long cannot report
+  itself scanned without having been.
+- **Not a nightly 3 a.m. scan.** That runs on machines awake at 3 a.m., which
+  describes servers, not the desktop switched off at the wall. The trigger is
+  idleness; the clock only enforces a minimum gap, at 20 hours rather than 24
+  so the window re-anchors instead of drifting later each day until it starts
+  skipping.
+- **The threshold widens when the user keeps coming back.** Somebody who
+  steps away for six minutes at a time would otherwise be interrupted by a
+  starting scan over and over, which is how a program becomes the thing you
+  disable.
+- **Idle detection** via `GetLastInputInfo`, `XScreenSaverQueryInfo` and
+  `ioreg`, in the new `system/idle.py`. It measures time since the last
+  keyboard or mouse input rather than CPU, because a machine compiling
+  overnight with nobody in the room is busy but idle. A platform that cannot
+  tell reports so, and unknown counts as *the user is present*.
+
+Two bugs found and fixed while writing the tests, both of the kind that
+produce no error and no log line:
+
+- `GetTickCount` wraps every 49.7 days, and the value `GetLastInputInfo`
+  returns lives in that space. Subtracting in Python's unbounded integers
+  gives a *negative* idle time for the 49.7 days after each wrap, which reads
+  as "the user is here" — so a machine with long uptime would quietly never
+  run a background scan again.
+- The scan attempt was launched inline from the scheduler's poll loop, which
+  blocked the very loop whose job is noticing that the user has come back.
+  The scan would have run to completion under somebody who had sat back down
+  — precisely the thing the scheduler exists to prevent.
+
 ### Changed — idle memory: 107 MB → 66 MB
 
 The only performance budget the project was breaching. Profiled rather than
